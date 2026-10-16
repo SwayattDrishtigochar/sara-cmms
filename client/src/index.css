@@ -1,0 +1,201 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ── Semantic design tokens ───────────────────────────────────────────────
+   Calm "control room": neutral slate surfaces, indigo brand, teal for AI,
+   one fixed colour per machine status (always paired with an icon + label). */
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --surface-2: #f0f2f5;
+  --surface-3: #e7eaef;
+  --border: #e2e6ec;
+  --border-strong: #cdd3dc;
+  --fg: #0f172a;
+  --muted: #556074;
+  --subtle: #8a94a5;
+  --brand: #4f46e5;
+  --brand-strong: #4338ca;
+  --brand-fg: #ffffff;
+  --brand-soft: #eef0ff;
+  --ai: #0f766e;
+  --ai-soft: #e6f7f5;
+  --running: #059669;
+  --idle: #d97706;
+  --stopped: #e11d48;
+  --off: #64748b;
+  --maint: #0284c7;
+  --info: #2563eb;
+  --warn: #d97706;
+  --critical: #dc2626;
+  --success: #16a34a;
+  --ring: #6366f1;
+  --shadow: 0 1px 2px rgb(15 23 42 / 0.06), 0 1px 3px rgb(15 23 42 / 0.06);
+  --shadow-lg: 0 10px 30px -10px rgb(15 23 42 / 0.25);
+  color-scheme: light;
+}
+
+.dark {
+  --bg: #0a0e15;
+  --surface: #10161f;
+  --surface-2: #161d29;
+  --surface-3: #1d2635;
+  --border: #222c3b;
+  --border-strong: #2f3b4e;
+  --fg: #e6ebf2;
+  --muted: #9aa6b8;
+  --subtle: #6c7889;
+  --brand: #818cf8;
+  --brand-strong: #a5b4fc;
+  --brand-fg: #0a0e15;
+  --brand-soft: #1b1f3d;
+  --ai: #2dd4bf;
+  --ai-soft: #0f2a2a;
+  --running: #34d399;
+  --idle: #fbbf24;
+  --stopped: #fb7185;
+  --off: #94a3b8;
+  --maint: #38bdf8;
+  --info: #60a5fa;
+  --warn: #fbbf24;
+  --critical: #f87171;
+  --success: #4ade80;
+  --ring: #818cf8;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-lg: 0 18px 40px -12px rgb(0 0 0 / 0.6);
+  color-scheme: dark;
+}
+
+@theme inline {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, monospace;
+
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-brand: var(--brand);
+  --color-brand-strong: var(--brand-strong);
+  --color-brand-fg: var(--brand-fg);
+  --color-brand-soft: var(--brand-soft);
+  --color-ai: var(--ai);
+  --color-ai-soft: var(--ai-soft);
+  --color-running: var(--running);
+  --color-idle: var(--idle);
+  --color-stopped: var(--stopped);
+  --color-off: var(--off);
+  --color-maint: var(--maint);
+  --color-info: var(--info);
+  --color-warn: var(--warn);
+  --color-critical: var(--critical);
+  --color-success: var(--success);
+  --color-ring: var(--ring);
+
+  --shadow-card: var(--shadow);
+  --shadow-pop: var(--shadow-lg);
+
+  --animate-shimmer: shimmer 1.6s linear infinite;
+  --animate-pulse-ring: pulse-ring 1.8s ease-out infinite;
+  --animate-fade-in: fade-in 160ms ease-out;
+  --animate-slide-in: slide-in 200ms ease-out;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: -400px 0;
+  }
+  to {
+    background-position: 400px 0;
+  }
+}
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--critical) 55%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 10px transparent;
+  }
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-bg font-sans text-fg antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+  ::selection {
+    background: color-mix(in oklab, var(--brand) 30%, transparent);
+  }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  .skeleton {
+    background: linear-gradient(90deg, var(--surface-2) 0%, var(--surface-3) 50%, var(--surface-2) 100%);
+    background-size: 800px 100%;
+    @apply animate-shimmer rounded-md;
+  }
+  /* AI-generated content: soft teal→indigo edge. */
+  .ai-edge {
+    border: 1px solid transparent;
+    background:
+      linear-gradient(var(--surface), var(--surface)) padding-box,
+      linear-gradient(
+        135deg,
+        color-mix(in oklab, var(--ai) 70%, transparent),
+        color-mix(in oklab, var(--brand) 60%, transparent)
+      )
+      border-box;
+  }
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+  }
+}
+
+/* Reduced motion: !important so it beats every component animation. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

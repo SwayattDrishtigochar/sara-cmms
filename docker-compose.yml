@@ -1,0 +1,85 @@
+# Dev databases: docker compose up -d                       → MongoDB + InfluxDB (then `pnpm dev`)
+# Full stack:    docker compose --profile app up -d --build  → + server (:5080) and web app (http://localhost:8080)
+# Simulator:     docker compose --profile sim up -d --build  → + ../sara-simulator (writes MongoDB + InfluxDB)
+# Everything:    docker compose --profile app --profile sim up -d --build
+# Variables come from ./.env (copy .env.example). Keep the project and volume names: they hold the dev data.
+# 27017 and 8086 are published on purpose: a simulator on a Raspberry Pi writes both over the LAN (no auth: demo LAN only).
+name: sara
+
+services:
+  mongo:
+    image: mongo:8
+    ports: ["27017:27017"]
+    volumes: [mongo-data:/data/db]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  influxdb:
+    image: influxdb:2.7
+    ports: ["8086:8086"]
+    # First start only (empty volume): creates the org, an admin user and the all-access token.
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUX_ADMIN_USER:-sara}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_ADMIN_PASSWORD:-sara-admin-pass}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUX_ORG:-sara}
+      DOCKER_INFLUXDB_INIT_BUCKET: bootstrap
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN:-sara-dev-token}
+    volumes: [influx-data:/var/lib/influxdb2]
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  server:
+    profiles: [app]
+    build: { context: ., dockerfile: server/Dockerfile }
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      PORT: 5080
+      MONGO_URI: mongodb://mongo:27017/sara
+      INFLUX_URL: http://influxdb:8086
+      CLIENT_URL: http://localhost:8080
+    ports: ["5080:5080"]
+    restart: unless-stopped
+    stop_grace_period: 15s
+    depends_on:
+      mongo: { condition: service_healthy }
+      influxdb: { condition: service_healthy }
+
+  client:
+    profiles: [app]
+    build: { context: ., dockerfile: client/Dockerfile }
+    ports: ["8080:80"]
+    restart: unless-stopped
+    depends_on:
+      server: { condition: service_healthy }
+
+  simulator:
+    profiles: [sim]
+    build: ../sara-simulator
+    # Optional: the simulator's defaults (Acme Components, swayatt.com …) apply without it.
+    env_file: [{ path: ../sara-simulator/.env, required: false }]
+    environment:
+      MONGO_URI: mongodb://mongo:27017/sara
+      INFLUX_URL: http://influxdb:8086
+      INFLUX_TOKEN: ${INFLUX_TOKEN:-sara-dev-token}
+      INFLUX_ORG: ${INFLUX_ORG:-sara}
+      SIM_USER_PASSWORD: ${SIM_DEFAULT_PASSWORD:-Sara@12345} # SARA shows this password for the simulated users
+      SIM_INSTANCE: ${SIM_INSTANCE:-docker}
+    restart: unless-stopped
+    stop_grace_period: 15s # on SIGTERM it sets every machine OFF and flushes (≤ 10 s)
+    depends_on:
+      mongo: { condition: service_healthy }
+      influxdb: { condition: service_healthy }
+
+volumes:
+  mongo-data: {}
+  influx-data: {}

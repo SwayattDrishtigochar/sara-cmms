@@ -1,0 +1,13 @@
+# Build context is the repo root (pnpm workspace): send only what the images need.
+**/node_modules
+**/dist
+**/coverage
+**/*.log
+.git
+.github
+.env
+.env.*
+!.env.example
+docs
+server/test
+client/src/**/*.test.*

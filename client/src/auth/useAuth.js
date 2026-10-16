@@ -1,0 +1,59 @@
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useEffect } from 'react';
+import { useNavigate } from 'react-router';
+import { api, getToken, setToken } from '../api/client.js';
+import { setFormatPrefs } from '../lib/format.js';
+
+/** The signed-in user and their company context (null when signed out). */
+export const useMe = () => {
+  const query = useQuery({
+    queryKey: ['me'],
+    queryFn: () => api('/auth/me'),
+    enabled: Boolean(getToken()),
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+  useEffect(() => {
+    if (query.data?.context) setFormatPrefs(query.data.context.company);
+  }, [query.data]);
+  return query;
+};
+
+/** Shortcut for components inside the authenticated shell. */
+export const useSession = () => {
+  const { data } = useMe();
+  return data?.context ?? null;
+};
+
+export const useLogin = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body) => api('/auth/login', { method: 'POST', body }),
+    onSuccess: (data) => {
+      setToken(data.token);
+      setFormatPrefs(data.context.company);
+      qc.setQueryData(['me'], { user: data.user, context: data.context });
+    },
+  });
+};
+
+export const useLogout = () => {
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  return useCallback(async () => {
+    try {
+      await api('/auth/logout', { method: 'POST' });
+    } catch {
+      // already signed out server-side
+    }
+    setToken(null);
+    qc.clear();
+    navigate('/login', { replace: true });
+  }, [qc, navigate]);
+};
+
+/** Can the current user create/update/delete in a module? */
+export const useCan = (moduleName) => {
+  const ctx = useSession();
+  return ctx?.can?.[moduleName] ?? { create: false, update: false, delete: false };
+};

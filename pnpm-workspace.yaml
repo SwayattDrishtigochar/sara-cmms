@@ -1,0 +1,13 @@
+packages:
+  - server
+  - client
+
+# pnpm 11+ blocks dependency build scripts unless approved here.
+allowBuilds:
+  protobufjs: true
+  '@google/genai': false # its only install script is an echo no-op
+
+minimumReleaseAgeExclude:
+  - '@tanstack/query-core@5.104.3'
+  - '@tanstack/react-query@5.104.3'
+  - jsdom@30.1.3

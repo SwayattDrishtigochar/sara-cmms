@@ -1,0 +1,23 @@
+{
+  "name": "sara",
+  "private": true,
+  "type": "module",
+  "description": "SARA — AI-first CMMS: Gemini agent over MongoDB + InfluxDB machine data",
+  "packageManager": "pnpm@12.11.2",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "seed": "pnpm --filter @sara/server seed",
+    "validate-db": "pnpm --filter @sara/server validate-db",
+    "eval": "pnpm --filter @sara/server eval"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.15"
+  }
+}

@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      mongo:
+        image: mongo:8
+        ports: ['27017:27017']
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      influxdb:
+        image: influxdb:2.7
+        ports: ['8086:8086']
+        env:
+          DOCKER_INFLUXDB_INIT_MODE: setup
+          DOCKER_INFLUXDB_INIT_USERNAME: sara
+          DOCKER_INFLUXDB_INIT_PASSWORD: sara-admin-pass
+          DOCKER_INFLUXDB_INIT_ORG: sara
+          DOCKER_INFLUXDB_INIT_BUCKET: bootstrap
+          DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: sara-dev-token
+        options: >-
+          --health-cmd "influx ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      # No .env in CI: the test setup derives MONGO_URI (sara_test_<n>) from MONGO_TEST_URI and forces AI_MOCK.
+      MONGO_TEST_URI: mongodb://localhost:27017
+      INFLUX_URL: http://localhost:8086
+      INFLUX_TOKEN: sara-dev-token
+      INFLUX_ORG: sara
+      AI_MOCK: 'true'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4 # version from package.json#packageManager
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec biome ci .
+      - run: pnpm --filter @sara/server test
+      - run: pnpm --filter @sara/client build
+      - run: pnpm --filter @sara/client test
+
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server/Dockerfile
+          push: false
+      - name: Client image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: client/Dockerfile
+          push: false
