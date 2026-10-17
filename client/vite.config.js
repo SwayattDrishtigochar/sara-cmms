@@ -9,7 +9,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       // ws: the voice assistant's WebSocket (/api/voice) rides the same proxy.
-      '/api': { target: `http://localhost:${process.env.PORT || 5080}`, changeOrigin: true, ws: true },
+      '/api': { target: `http://localhost:${process.env.PORTS || 5080}`, changeOrigin: true, ws: true },
     },
   },
   build: { chunkSizeWarningLimit: 1200 },

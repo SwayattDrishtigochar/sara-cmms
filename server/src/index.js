@@ -31,6 +31,10 @@ const start = async () => {
   await connectMongo();
   logger.info('MongoDB connected');
   await ensurePlatform();
+  if (env.DEMO_MODE)
+    logger.warn(
+      'DEMO_MODE is on: the login page lists the demo accounts and signs them in without a password. Never run this in production.',
+    );
 
   const app = createApp({
     routers: [
@@ -53,9 +57,9 @@ const start = async () => {
   });
   // Express 5 hands listen errors (EADDRINUSE) to the callback; reject so start() fails loudly.
   const server = await new Promise((resolve, reject) => {
-    const s = app.listen(env.PORT, (err) => (err ? reject(err) : resolve(s)));
+    const s = app.listen(env.PORTS, (err) => (err ? reject(err) : resolve(s)));
   });
-  logger.info(`SARA server listening on http://localhost:${env.PORT}`);
+  logger.info(`SARA server listening on http://localhost:${env.PORTS}`);
   const voice = attachVoiceServer(server);
   const stopAnomalyWatch = startAnomalyWatch();
   const stopCostWatch = startCostWatch();

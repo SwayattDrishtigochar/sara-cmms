@@ -25,5 +25,5 @@ WORKDIR /app/server
 USER node
 EXPOSE 5080
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
-  CMD ["node", "-e", "fetch(`http://127.0.0.1:${process.env.PORT}/api/health`).then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+  CMD ["node", "-e", "fetch(`http://127.0.0.1:${process.env.PORTS}/api/health`).then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
 CMD ["node", "src/index.js"]
