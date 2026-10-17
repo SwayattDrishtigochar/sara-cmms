@@ -1,0 +1,40 @@
+# Local development databases only (the deployment uses hosted MongoDB and InfluxDB, see docker-compose.yml):
+#   docker compose -f docker-compose.dev.yml up -d     → MongoDB :27017 + InfluxDB :8086, then `pnpm dev`
+# The defaults in .env.example point at these. Keep the project and volume names: they hold the dev data.
+# 27017 and 8086 are published without auth: LAN use only.
+name: sara-dev
+
+services:
+  mongo:
+    image: mongo:8
+    ports: ["27017:27017"]
+    volumes: [mongo-data:/data/db]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  influxdb:
+    image: influxdb:2.7
+    ports: ["8086:8086"]
+    # First start only (empty volume): creates the org, an admin user and the all-access token.
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUX_ADMIN_USER:-sara}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_ADMIN_PASSWORD:-sara-admin-pass}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUX_ORG:-sara}
+      DOCKER_INFLUXDB_INIT_BUCKET: bootstrap
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN:-sara-dev-token}
+    volumes: [influx-data:/var/lib/influxdb2]
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  mongo-data: {}
+  influx-data: {}

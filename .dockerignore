@@ -9,5 +9,6 @@
 .env.*
 !.env.example
 docs
+deploy
 server/test
 client/src/**/*.test.*

@@ -1,86 +1,58 @@
-# Dev databases: docker compose up -d                       → MongoDB + InfluxDB (then `pnpm dev`)
-# Full stack:    docker compose --profile app up -d --build  → + server (:5080) and web app (http://localhost:8080)
-# Telemetry:     docker compose --profile sim up -d --build  → + ../sara-simulator (writes MongoDB + InfluxDB, control panel on :5090)
-# Everything:    docker compose --profile app --profile sim up -d --build
-# Variables come from ./.env (copy .env.example). Keep the project and volume names: they hold the dev data.
-# 27017 and 8086 are published on purpose: a telemetry source on a Raspberry Pi writes both over the LAN (no auth: LAN only).
+# SARA on its own server: the API + the web app. MongoDB and InfluxDB are hosted elsewhere, so this file
+# runs no database; MONGO_URI, INFLUX_URL, INFLUX_TOKEN and INFLUX_ORG come from ./.env (copy .env.example).
+#
+#   cp .env.example .env            # fill the hosted database URLs, JWT_SECRET, GEMINI_API_KEY, CLIENT_URL
+#   docker compose up -d --build    # web app on http://<this host>:${WEB_PORT:-80}, /api proxied to the server
+#   docker compose exec server node scripts/seed.js   # first time only: platform tenant + superadmin
+#
+# HTTPS (the voice assistant's microphone only works on a secure origin): set DOMAIN and WEB_PORT=127.0.0.1:8080
+# in .env, open 80 + 443, then  docker compose --profile tls up -d --build  (Caddy, automatic certificate).
+# Ubuntu VM (GCP): bash deploy/install-ubuntu.sh installs Docker and prints these steps.
+# The telemetry source (sara-simulator) runs on another server from its own repo and compose file.
+# Local development databases: docker compose -f docker-compose.dev.yml up -d
 name: sara
 
 services:
-  mongo:
-    image: mongo:8
-    ports: ["27017:27017"]
-    volumes: [mongo-data:/data/db]
-    healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
-
-  influxdb:
-    image: influxdb:2.7
-    ports: ["8086:8086"]
-    # First start only (empty volume): creates the org, an admin user and the all-access token.
-    environment:
-      DOCKER_INFLUXDB_INIT_MODE: setup
-      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUX_ADMIN_USER:-sara}
-      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_ADMIN_PASSWORD:-sara-admin-pass}
-      DOCKER_INFLUXDB_INIT_ORG: ${INFLUX_ORG:-sara}
-      DOCKER_INFLUXDB_INIT_BUCKET: bootstrap
-      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN:-sara-dev-token}
-    volumes: [influx-data:/var/lib/influxdb2]
-    healthcheck:
-      test: ["CMD", "influx", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
-
   server:
-    profiles: [app]
     build: { context: ., dockerfile: server/Dockerfile }
     env_file: .env
     environment:
       NODE_ENV: production
       PORT: 5080
-      MONGO_URI: mongodb://mongo:27017/sara
-      INFLUX_URL: http://influxdb:8086
-      CLIENT_URL: http://localhost:8080
-    ports: ["5080:5080"]
+    # Not published: the web app's nginx proxies /api (REST, SSE and the voice WebSocket) to it.
+    expose: ["5080"]
     restart: unless-stopped
     stop_grace_period: 15s
-    depends_on:
-      mongo: { condition: service_healthy }
-      influxdb: { condition: service_healthy }
+    logging: { driver: json-file, options: { max-size: 20m, max-file: "5" } }
 
   client:
-    profiles: [app]
-    build: { context: ., dockerfile: client/Dockerfile }
-    ports: ["8080:80"]
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+      args:
+        VITE_API_URL: ""              # same origin: nginx proxies /api
+        VITE_APP_NAME: ${VITE_APP_NAME:-SARA}
+    # WEB_PORT=80 for plain HTTP; with the tls profile WEB_PORT=127.0.0.1:8080 so only Caddy is public.
+    ports: ["${WEB_PORT:-80}:80"]
     restart: unless-stopped
     depends_on:
       server: { condition: service_healthy }
+    logging: { driver: json-file, options: { max-size: 20m, max-file: "5" } }
 
-  simulator:
-    profiles: [sim]
-    build: ../sara-simulator
-    # Its own .env carries the company, SIM_USER_PASSWORD, SIM_UI_PASSWORD and SIM_UI_PORT (control panel).
-    env_file: [{ path: ../sara-simulator/.env, required: false }]
+  caddy:
+    profiles: [tls]
+    image: caddy:2-alpine
+    ports: ["80:80", "443:443"]
     environment:
-      MONGO_URI: mongodb://mongo:27017/sara
-      INFLUX_URL: http://influxdb:8086
-      INFLUX_TOKEN: ${INFLUX_TOKEN:-sara-dev-token}
-      INFLUX_ORG: ${INFLUX_ORG:-sara}
-      SIM_USER_PASSWORD: ${SIM_USER_PASSWORD:-Sara@12345}
-      SIM_INSTANCE: ${SIM_INSTANCE:-docker}
-    ports: ["5090:5090"]
+      DOMAIN: ${DOMAIN:-}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data        # certificates
+      - caddy-config:/config
     restart: unless-stopped
-    stop_grace_period: 15s # on SIGTERM it sets every machine OFF and flushes (≤ 10 s)
-    depends_on:
-      mongo: { condition: service_healthy }
-      influxdb: { condition: service_healthy }
+    depends_on: [client]
+    logging: { driver: json-file, options: { max-size: 20m, max-file: "5" } }
 
 volumes:
-  mongo-data: {}
-  influx-data: {}
+  caddy-data: {}
+  caddy-config: {}

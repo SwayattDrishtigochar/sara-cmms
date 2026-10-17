@@ -305,9 +305,9 @@ Built as in the plan; the `engines/`, `kpis/` and `jobs/` folders are being fill
 
 | What | How |
 |---|---|
-| Dev | `docker compose up -d` (mongo + influxdb) or a remote MongoDB/InfluxDB, `pnpm seed`, simulator `npm start`, `pnpm dev` (server :5080 with `--watch`, Vite :5173); step by step in `README.md` |
-| Full stack | `docker compose --profile app up -d --build` → server :5080, web app http://localhost:8080 |
-| Simulator in compose | `docker compose --profile sim up -d --build` (builds `../sara-simulator`, points it at the compose services) |
+| Dev | `docker compose -f docker-compose.dev.yml up -d` (mongo + influxdb) or the hosted MongoDB/InfluxDB, `pnpm seed`, simulator `npm start`, `pnpm dev` (server :5080 with `--watch`, Vite :5173); step by step in `README.md` |
+| SARA server | `docker compose up -d --build` in `sara/` → `server` (internal :5080) + `client` (nginx on `WEB_PORT`, proxies `/api`); both read the hosted databases from `.env`; no database container |
+| Simulator server | `docker compose up -d --build` in `sara-simulator/` on another machine (or `deploy/install-pi.sh` on a Pi); same `MONGO_URI`/`INFLUX_*`, control panel on `SIM_UI_PORT` |
 | Server image | `server/Dockerfile`: multi-stage, pnpm `--prod --filter @sara/server`, `node:26-slim`, user `node`, HEALTHCHECK on `/api/health` (200 while Mongo is up) |
 | Client image | `client/Dockerfile`: Vite build, `nginx:1.29-alpine`, SPA fallback, `/api` proxy, SSE unbuffered |
 | Raspberry Pi | `sara-simulator/deploy/install-pi.sh` → Node 22, user `sara`, `/opt/sara-simulator`, systemd unit (`Restart=always`); or the multi-arch `node:22-slim` image |

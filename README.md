@@ -58,7 +58,7 @@ Details: [docs/system-design.md](docs/system-design.md), the simulator contract
 ## Setup (about 10 minutes)
 
 **You need:** Node.js 22 or newer, pnpm (`corepack enable`; the version is pinned in `package.json`), and MongoDB 8
-plus InfluxDB 2.x, either from the bundled `docker compose` (Docker Desktop) or a server you already have. A Gemini
+plus InfluxDB 2.x, either hosted (what the deployment uses) or local from `docker compose -f docker-compose.dev.yml up -d`. A Gemini
 API key is optional: with `AI_MOCK=true` every AI feature runs on the scripted mock and nothing is spent.
 
 Run the steps in this order: the simulator needs the database, and SARA needs the simulator's company.
@@ -71,8 +71,8 @@ cp .env.example .env            # Windows: copy .env.example .env
 # In .env: set JWT_SECRET, SUPERADMIN_PASSWORD, and either GEMINI_API_KEY=<your key> or AI_MOCK=true
 
 # 2. Databases: pick one
-docker compose up -d            # a) local MongoDB :27017 + InfluxDB :8086 (the defaults in .env work)
-                                # b) remote: set MONGO_URI and INFLUX_* in .env (see below)
+docker compose -f docker-compose.dev.yml up -d   # a) local MongoDB :27017 + InfluxDB :8086 (the defaults in .env work)
+                                                 # b) hosted: set MONGO_URI and INFLUX_* in .env (see below)
 
 # 3. Platform tenant + superadmin
 pnpm seed
@@ -123,8 +123,8 @@ Clear; each injection's outcome and whether and how fast SARA detected it) and t
 - **Laptop:** `npm start` in `sara-simulator`; the panel is served by the same process (prebuilt in `ui/dist`).
 - **Raspberry Pi:** `sudo bash deploy/install-pi.sh`, then fill `MONGO_URI`, `INFLUX_*` and `SIM_UI_PASSWORD` in
   `/opt/sara-simulator/.env` and `sudo systemctl restart sara-simulator`; the script prints the panel URL.
-- **Docker:** `docker compose --profile sim up -d --build` here (publishes 5090; the simulator's own `.env` supplies
-  `SIM_UI_PASSWORD`), or `docker run … -p 5090:5090` in the simulator repo.
+- **Docker (its own server):** `docker compose up -d --build` in the simulator repo; its `.env` supplies the hosted
+  database URLs and `SIM_UI_PASSWORD`, and the panel is published on `SIM_UI_PORT` (5090).
 
 Details: [sara-simulator README](../sara-simulator/README.md#control-panel).
 
@@ -395,16 +395,29 @@ database path in that URI is ignored and `?options` are kept. On a shared or rem
 `SARA_TEST_DB` to a unique label that cannot match a database already on the server (never `sara`, `test`, `admin`,
 `local`, `config`). `pnpm eval` drops and reseeds `sara_eval` (or `SARA_EVAL_DB`) the same way.
 
-## Docker
+## Deployment (Docker)
+
+MongoDB and InfluxDB are hosted services; SARA and the simulator deploy on two different servers, each from its
+own repo and compose file. Neither compose file runs a database.
+
+**SARA server (this repo):**
 
 ```sh
-docker compose up -d                                          # databases only
-docker compose --profile app up -d --build                    # + server :5080 and web app http://localhost:8080
-docker compose --profile sim up -d --build                    # + ../sara-simulator
-docker compose --profile app --profile sim up -d --build      # everything
+cp .env.example .env     # MONGO_URI, INFLUX_URL/TOKEN/ORG of the hosted databases, JWT_SECRET, SUPERADMIN_PASSWORD,
+                         # GEMINI_API_KEY (or AI_MOCK=true), CLIENT_URL=https://<public web address>, WEB_PORT (80)
+docker compose up -d --build                      # server (internal :5080) + web app on :${WEB_PORT}
+docker compose exec server node scripts/seed.js   # first time only: platform tenant + superadmin
+docker compose logs -f server                     # watch it come up
 ```
 
-Compose reads `./.env`. Its `server` and `simulator` services point at the compose databases.
+The web app's nginx proxies `/api` (REST, SSE and the voice WebSocket) to the server container, so only the
+web port is published; put TLS in front of it (a reverse proxy or a load balancer) and set `CLIENT_URL` to that
+public address. Images: `server/Dockerfile` (`node:26-slim`, HEALTHCHECK on `/api/health`) and `client/Dockerfile`
+(Vite build on `nginx:1.29-alpine`, `client/nginx.conf`). Local development databases: `docker-compose.dev.yml`.
+
+**Simulator server (the `sara-simulator` repo):** `cp .env.example .env` with the same `MONGO_URI` and `INFLUX_*`
+values plus `SIM_UI_PASSWORD`, then `docker compose up -d --build`; the control panel is on `SIM_UI_PORT` (5090).
+Details in that repo's README (also covers a Raspberry Pi without Docker).
 
 ## Troubleshooting
 
