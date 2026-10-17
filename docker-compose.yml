@@ -1,57 +1,92 @@
-# SARA on its own server: the API + the web app. MongoDB and InfluxDB are hosted elsewhere, so this file
-# runs no database; MONGO_URI, INFLUX_URL, INFLUX_TOKEN and INFLUX_ORG come from ./.env (copy .env.example).
-#
-#   cp .env.example .env            # fill the hosted database URLs, JWT_SECRET, GEMINI_API_KEY, CLIENT_URL
-#   docker compose up -d --build    # web app on http://<this host>:${WEB_PORT:-80}, /api proxied to the server
-#   docker compose exec server node scripts/seed.js   # first time only: platform tenant + superadmin
-#
-# HTTPS (the voice assistant's microphone only works on a secure origin): set DOMAIN and WEB_PORT=127.0.0.1:8080
-# in .env, open 80 + 443, then  docker compose --profile tls up -d --build  (Caddy, automatic certificate).
-# Ubuntu VM (GCP): bash deploy/install-ubuntu.sh installs Docker and prints these steps.
-# The telemetry source (sara-simulator) runs on another server from its own repo and compose file.
-# Local development databases: docker compose -f docker-compose.dev.yml up -d
+
+# SARA API + web app
+# MongoDB and InfluxDB are hosted externally.
+# Database credentials and application secrets are loaded from .env.
+
 name: sara
 
 services:
   server:
-    build: { context: ., dockerfile: server/Dockerfile }
-    env_file: .env
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+
+    env_file:
+      - .env
+
     environment:
       NODE_ENV: production
       PORT: 5080
-    # Not published: the web app's nginx proxies /api (REST, SSE and the voice WebSocket) to it.
-    expose: ["5080"]
+
+    # Publish backend only on localhost for Apache reverse proxy.
+    # It will not be directly accessible from the public network.
+    ports:
+      - "127.0.0.1:5080:5080"
+
+    expose:
+      - "5080"
+
     restart: unless-stopped
     stop_grace_period: 15s
-    logging: { driver: json-file, options: { max-size: 20m, max-file: "5" } }
+
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
 
   client:
     build:
       context: .
       dockerfile: client/Dockerfile
       args:
-        VITE_API_URL: ""              # same origin: nginx proxies /api
+        VITE_API_URL: ""
         VITE_APP_NAME: ${VITE_APP_NAME:-SARA}
-    # WEB_PORT=80 for plain HTTP; with the tls profile WEB_PORT=127.0.0.1:8080 so only Caddy is public.
-    ports: ["${WEB_PORT:-80}:80"]
+
+    # Apache handles HTTPS and forwards requests to this port.
+    ports:
+      - "${WEB_PORT:-80}:80"
+
     restart: unless-stopped
+
     depends_on:
-      server: { condition: service_healthy }
-    logging: { driver: json-file, options: { max-size: 20m, max-file: "5" } }
+      server:
+        condition: service_healthy
+
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
 
   caddy:
-    profiles: [tls]
+    profiles:
+      - tls
+
     image: caddy:2-alpine
-    ports: ["80:80", "443:443"]
+
+    ports:
+      - "80:80"
+      - "443:443"
+
     environment:
       DOMAIN: ${DOMAIN:-}
+
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data        # certificates
+      - caddy-data:/data
       - caddy-config:/config
+
     restart: unless-stopped
-    depends_on: [client]
-    logging: { driver: json-file, options: { max-size: 20m, max-file: "5" } }
+
+    depends_on:
+      - client
+
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
 
 volumes:
   caddy-data: {}
