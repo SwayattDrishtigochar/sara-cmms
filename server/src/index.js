@@ -57,9 +57,9 @@ const start = async () => {
   });
   // Express 5 hands listen errors (EADDRINUSE) to the callback; reject so start() fails loudly.
   const server = await new Promise((resolve, reject) => {
-    const s = app.listen(env.PORTS, (err) => (err ? reject(err) : resolve(s)));
+    const s = app.listen(env.PORT, (err) => (err ? reject(err) : resolve(s)));
   });
-  logger.info(`SARA server listening on http://localhost:${env.PORTS}`);
+  logger.info(`SARA server listening on http://localhost:${env.PORT}`);
   const voice = attachVoiceServer(server);
   const stopAnomalyWatch = startAnomalyWatch();
   const stopCostWatch = startCostWatch();
