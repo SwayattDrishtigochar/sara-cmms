@@ -1,0 +1,9 @@
+# HTTPS front for SARA (docker compose --profile tls). Caddy gets and renews the Let's Encrypt certificate for
+# DOMAIN by itself: the domain's A record must point at this VM and ports 80 + 443 must be open.
+# Everything (pages, /api REST, SSE streams and the /api/voice WebSocket) goes to the web app's nginx.
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy client:80 {
+		flush_interval -1
+	}
+}

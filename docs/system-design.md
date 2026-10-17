@@ -306,8 +306,8 @@ Built as in the plan; the `engines/`, `kpis/` and `jobs/` folders are being fill
 | What | How |
 |---|---|
 | Dev | `docker compose -f docker-compose.dev.yml up -d` (mongo + influxdb) or the hosted MongoDB/InfluxDB, `pnpm seed`, simulator `npm start`, `pnpm dev` (server :5080 with `--watch`, Vite :5173); step by step in `README.md` |
-| SARA server | `docker compose up -d --build` in `sara/` → `server` (internal :5080) + `client` (nginx on `WEB_PORT`, proxies `/api`); both read the hosted databases from `.env`; no database container |
-| Simulator server | `docker compose up -d --build` in `sara-simulator/` on another machine (or `deploy/install-pi.sh` on a Pi); same `MONGO_URI`/`INFLUX_*`, control panel on `SIM_UI_PORT` |
+| SARA server (GCP Ubuntu VM) | `deploy/install-ubuntu.sh` (Docker, boot start, swap), then `docker compose --profile tls up -d --build` in `sara/` → `caddy` (80/443, automatic certificate for `DOMAIN`) → `client` (nginx, proxies `/api`) → `server` (internal :5080); both read the hosted databases from `.env`; no database container; HTTPS is required for the voice assistant's microphone |
+| Simulator server (GCP Ubuntu VM) | `deploy/install-ubuntu.sh`, then `docker compose up -d --build` in `sara-simulator/` on another VM (or `deploy/install-pi.sh` on a Pi); same `MONGO_URI`/`INFLUX_*`, control panel on `SIM_UI_PORT`, firewall limited to the operator's IP |
 | Server image | `server/Dockerfile`: multi-stage, pnpm `--prod --filter @sara/server`, `node:26-slim`, user `node`, HEALTHCHECK on `/api/health` (200 while Mongo is up) |
 | Client image | `client/Dockerfile`: Vite build, `nginx:1.29-alpine`, SPA fallback, `/api` proxy, SSE unbuffered |
 | Raspberry Pi | `sara-simulator/deploy/install-pi.sh` → Node 22, user `sara`, `/opt/sara-simulator`, systemd unit (`Restart=always`); or the multi-arch `node:22-slim` image |

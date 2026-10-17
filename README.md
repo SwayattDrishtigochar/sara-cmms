@@ -88,6 +88,12 @@ pnpm dev                        # API http://localhost:5080, web app http://loca
 `pnpm seed` creates only the platform tenant and the superadmin; every customer company comes from the
 simulator (tests seed their own companies through `server/test/helpers/fixtures.js`).
 
+**Demo mode.** With `DEMO_MODE=true` the login page shows a **Demo accounts** panel under the sign-in form: every
+person at `DEMO_DOMAIN` (default `swayatt.com`, the simulator's company), grouped by company with their role and
+job title. Clicking a person signs them in at once, no password. The superadmin is never listed and always uses
+a password. Anyone who can open the page can sign in as any of them, so never turn it on in production; the
+server logs a warning at boot while it is on.
+
 ### Remote MongoDB / InfluxDB
 
 - `MONGO_URI` must name the database: `mongodb://<host>:27017/sara`. Replica sets and Atlas work too, e.g.
@@ -233,6 +239,10 @@ inject overheating on CNC 2, the Command Center briefing, Machine 360, the AI fl
 work order from the anomaly (or SARA opens it by itself), a simulated technician repairs it, the anomaly resolves,
 and the viewer is read-only. It was rehearsed live with `AI_MOCK=true`. An optional Planner extension (production
 plan with operators, a whole-plant maintenance plan, edit → Check → Create) follows the main script.
+
+**Signing in:** with `DEMO_MODE=true` in `.env`, click a person in the **Demo accounts** panel on the login page
+(the panel lists the simulator's 28 people by role; the superadmin still signs in with a password). With it off,
+type `<role>_<n>@swayatt.com` / `Sara@12345`.
 
 **Before the demo:** simulator online (its control panel on port 5090), Activity speed back to a normal value after any
 fast-forward (high speeds compress work order durations, which skews MTTR, labour cost and planning history),
@@ -418,6 +428,34 @@ public address. Images: `server/Dockerfile` (`node:26-slim`, HEALTHCHECK on `/ap
 **Simulator server (the `sara-simulator` repo):** `cp .env.example .env` with the same `MONGO_URI` and `INFLUX_*`
 values plus `SIM_UI_PASSWORD`, then `docker compose up -d --build`; the control panel is on `SIM_UI_PORT` (5090).
 Details in that repo's README (also covers a Raspberry Pi without Docker).
+
+### GCP (Ubuntu VM)
+
+One VM per repo: SARA on `e2-medium` or larger (the web app build needs about 2 GB), the simulator on `e2-small`.
+Ubuntu 22.04 or 24.04.
+
+```sh
+# on the SARA VM
+git clone <repo-url> sara && cd sara
+bash deploy/install-ubuntu.sh        # Docker Engine + Compose, starts on boot, swap on small VMs, creates .env
+nano .env                            # hosted MONGO_URI + INFLUX_*, JWT_SECRET, SUPERADMIN_PASSWORD, GEMINI_API_KEY,
+                                     # CLIENT_URL=https://<domain>, DOMAIN=<domain>, WEB_PORT=127.0.0.1:8080
+docker compose --profile tls up -d --build       # Caddy on 80/443 with an automatic Let's Encrypt certificate
+docker compose exec server node scripts/seed.js  # first time only
+```
+
+Firewall (from your machine, once; tag the VM with `sara`):
+
+```sh
+gcloud compute firewall-rules create sara-web --allow tcp:80,tcp:443 --target-tags sara
+gcloud compute firewall-rules create sara-sim-panel --allow tcp:5090 --target-tags sara-sim --source-ranges <your ip>/32
+```
+
+Point the domain's A record at the SARA VM's external IP before the first `--profile tls` start, so Caddy can get
+the certificate. HTTPS is not optional for the voice assistant: browsers allow the microphone only on `https://`
+(or `localhost`). Without a domain, `docker compose up -d --build` serves plain HTTP on `WEB_PORT` for testing.
+The containers restart on reboot (`restart: unless-stopped` + Docker enabled on boot); update with
+`git pull && docker compose --profile tls up -d --build`.
 
 ## Troubleshooting
 

@@ -149,16 +149,108 @@ describe('runTurn', () => {
     expect(loadedGroups).toEqual(expect.arrayContaining(['telemetry', 'health']));
   });
 
-  it('caps the tool iterations and still answers', async () => {
+  it('caps the tool iterations, tells the model to answer, and still answers', async () => {
     script(
       /show endless/i,
-      new Array(20).fill({ calls: [{ name: 'mongo_count', args: { module: 'assets' } }] }),
+      Array.from({ length: 20 }, (_, i) => ({
+        calls: [{ name: 'mongo_count', args: { module: 'assets', filter: { healthScore: { $gte: i } } } }],
+      })),
     );
     const { sse, message } = await turn(await newConversation(), 'show endless lookups');
     expect(sse.of('tool_call')).toHaveLength(env.MAX_TOOL_ITERATIONS);
     expect(sse.of('notice').some((n) => /stopped after/.test(n.text))).toBe(true);
     expect(calls.at(-1).tools).toBeUndefined(); // the last step had no tools
+    expect(calls.at(-1).system).toMatch(/do not ask whether to try again/);
     expect(message.status).toBe('complete');
+  });
+
+  it('runs an identical read once per turn, free of the budget, and charges a third repeat', async () => {
+    const call = { name: 'mongo_count', args: { module: 'assets', filter: { assetStatus: 'Running' } } };
+    const same = { name: 'mongo_count', args: { filter: { assetStatus: 'Running' }, module: 'assets' } };
+    script(/show cached counts/i, [{ calls: [call, same] }, { calls: [same] }, { text: 'Counted once.' }]);
+    const { sse, message } = await turn(await newConversation(), 'show cached counts');
+    const results = sse.of('tool_result');
+    expect(results.map((r) => [r.ok, r.cached ?? false])).toEqual([
+      [true, false],
+      [true, true],
+      [true, true],
+    ]);
+    expect(await AiToolAudit.countDocuments({ messageId: message._id, tool: 'mongo_count' })).toBe(1);
+    expect(message.parts.filter((p) => p.type === 'tool_result')).toHaveLength(3);
+  });
+
+  it('fills "$start"/"$stop" from the latest resolved range and keeps the rows of a result for later turns', async () => {
+    script(/show placeholder dates/i, [
+      { calls: [{ name: 'resolve_time_range', args: { text: 'last 7 days' } }] },
+      {
+        calls: [
+          {
+            name: 'mongo_find',
+            args: { module: 'workorders', filter: { createdAt: { $gte: '$start', $lt: '$stop' } }, limit: 3 },
+          },
+        ],
+      },
+      { text: 'Done.' },
+    ]);
+    const conversation = await newConversation();
+    const { sse, message } = await turn(conversation, 'show placeholder dates');
+    const [range, find] = sse.of('tool_result');
+    expect(find).toMatchObject({ name: 'mongo_find', ok: true });
+    const audit = await AiToolAudit.findOne({ messageId: message._id, tool: 'mongo_find' }).lean();
+    expect(audit.args.filter.createdAt.$gte).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(range.ok).toBe(true);
+    const stored = message.parts.find((p) => p.type === 'tool_result' && p.name === 'mongo_find');
+    expect(Array.isArray(stored.data?.rows)).toBe(true);
+
+    // next turn: a sourceRef from the earlier turn still renders
+    script(/render the old rows/i, [
+      { calls: [{ name: 'render_table', args: { title: 'Old rows', sourceRef: find.id } }] },
+      { text: 'Here.' },
+    ]);
+    const second = await turn(conversation, 'render the old rows');
+    const block = second.sse.of('block')[0];
+    expect(block?.type).toBe('table');
+    expect(block.payload.rows).toHaveLength(stored.data.rows.length);
+    expect(second.sse.of('tool_result')[0].ok).toBe(true);
+  });
+
+  it('keeps "$start"/"$stop" inside a KPI definition for the runner', async () => {
+    script(/kpi of anomalies/i, [
+      {
+        calls: [
+          {
+            name: 'create_kpi',
+            args: {
+              title: 'Anomalies by severity',
+              viz: 'bar',
+              timeRange: { text: 'last 3 days' },
+              sources: [
+                {
+                  key: 'anomalies',
+                  tool: 'mongo_aggregate',
+                  args: {
+                    module: 'anomalies',
+                    pipeline: [
+                      { $match: { detectedAt: { $gte: '$start', $lte: '$stop' } } },
+                      { $group: { _id: '$severity', count: { $sum: 1 } } },
+                    ],
+                  },
+                },
+              ],
+              encoding: { source: 'anomalies', x: '_id', y: 'count' },
+            },
+          },
+        ],
+      },
+      { text: 'Created.' },
+    ]);
+    const { sse, message } = await turn(
+      await newConversation(),
+      'make a kpi of anomalies for the last 3 days',
+    );
+    expect(sse.of('done')[0].status).toBe('awaiting_confirmation');
+    const match = message.pendingAction.args.sources[0].args.pipeline[0].$match.detectedAt;
+    expect(match).toEqual({ $gte: '$start', $lte: '$stop' });
   });
 
   it('stops when asked', async () => {
@@ -298,13 +390,11 @@ describe('writes need confirmation', () => {
     const confirm = sse.of('block').find((b) => b.type === 'confirm');
     expect(confirm.payload).toMatchObject({ tool: 'create_record', module: 'workorders', status: 'pending' });
     expect(confirm.payload.actionId).toBeTruthy();
-    // The preview shows what was asked for (plus the starting status), not the record's bookkeeping.
-    expect(Object.keys(confirm.payload.items[0].doc).sort()).toEqual([
-      'asset',
-      'name',
-      'priority',
-      'workStatus',
-    ]);
+    // The preview shows what was asked for, what SARA decided (with a "SARA decided" line) and the starting
+    // status, not the record's bookkeeping.
+    const shown = Object.keys(confirm.payload.items[0].doc);
+    expect(shown).toEqual(expect.arrayContaining(['asset', 'name', 'priority', 'workStatus', 'saraDecided']));
+    expect(shown).not.toEqual(expect.arrayContaining(['trackProcess', 'durations', 'comments', 'companyId']));
     expect(sse.of('tool_result').find((r) => r.name === 'create_record')).toMatchObject({
       ok: false,
       error: 'one change at a time',

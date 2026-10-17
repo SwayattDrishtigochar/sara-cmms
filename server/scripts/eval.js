@@ -26,8 +26,9 @@ const { claimPendingAction } = await import('../src/agent/pendingActions.js');
 const { AiConversation } = await import('../src/db/models/AiConversation.js');
 const { contextFor, setupDatabase, teardownDatabase } = await import('../test/helpers/db.js');
 const { clearScripts, recorder, refOf, resultOf, script } = await import('../test/helpers/mockGemini.js');
-const { hasModule } = await import('../src/modules/registry.js');
+const { getModule, hasModule } = await import('../src/modules/registry.js');
 const { demoChat } = await import('../src/ai/mockChat.js');
+const { getTool } = await import('../src/agent/tools/registry.js');
 
 const TELEMETRY = new Set([
   'telemetry_fields',
@@ -737,7 +738,10 @@ const CASES = [
     name: 'P5-7 chat starter: work order for IMM 3 (confirm)',
     demo: true,
     text: 'Create a work order for IMM 3: coolant leak, high priority, due tomorrow',
-    tools: ['resolve', 'resolve_time_range', 'create_record'],
+    // No assignee named: SARA asks who is free (available_people arrives with T2; until then it errors and
+    // the draft goes out unassigned).
+    tools: ['resolve', 'resolve_time_range', 'available_people', 'create_record'],
+    mayFail: ['available_people'],
     blocks: ['confirm'],
     confirm: true,
     after: ['create_record'],
@@ -790,7 +794,150 @@ const CASES = [
     after: ['create_record'],
     mentions: /Done: \*\*\[WO-\d+.* and \*\*\[WO-\d+.* are open/,
   },
+  // Decisive-agent cases (owner_1's real asks): no details given, SARA decides the fields and confirms.
+  {
+    name: 'D-1 work order for Furnace 2 breakdown, nothing else given (confirm)',
+    demo: true,
+    text: 'Create a work order for Furnace 2 breakdown',
+    tools: ['resolve', 'available_people', 'telemetry_latest', 'create_record'],
+    mayFail: ['available_people'],
+    blocks: ['confirm'],
+    confirm: true,
+    after: ['create_record'],
+    check: (sse) => {
+      const item = sse.of('tool_call').find((c) => c.name === 'create_record')?.args.items[0] ?? {};
+      const want = { priority: 'High', category: 'Breakdown', estimatedDurationMin: 120 };
+      const wrong = Object.entries(want).filter(([k, v]) => item[k] !== v);
+      return [
+        ...wrong.map(([k, v]) => `decided ${k} = ${item[k]} (expected ${v})`),
+        ...(item.dueDate ? [] : ['no dueDate decided']),
+        ...(/Furnace 2/.test(item.name) && item.asset ? [] : ['title or asset missing']),
+        ...(/Decided: priority High \(breakdown\)/.test(said(sse)) ? [] : ['no "Decided:" line']),
+      ];
+    },
+    mentions: /Done: \*\*\[WO-\d+.*for Furnace 2/,
+  },
+  {
+    name: 'D-2 Hinglish: Furnace 2 ke liye breakdown work order banao (confirm, answered in Hinglish)',
+    demo: true,
+    text: 'Furnace 2 ke liye breakdown work order banao',
+    tools: ['resolve', 'available_people', 'telemetry_latest', 'create_record'],
+    mayFail: ['available_people'],
+    blocks: ['confirm'],
+    confirm: true,
+    after: ['create_record'],
+    check: (sse) => (/Maine tay kiya: priority High/.test(said(sse)) ? [] : ['not in Hinglish']),
+    mentions: /^Ho gaya: \*\*\[WO-\d+.*Furnace 2 ke liye/m,
+  },
+  {
+    name: 'D-3 assign whoever is free to an open work order (confirm)',
+    demo: true,
+    skipUnless: () => Boolean(getTool('assign_work_order')), // T2 adds the tool
+    text: async (ctx) => {
+      // An Open work order whose code is unique across plants (the fixture repeats codes per plant).
+      const all = await getModule('workorders')
+        .Model.find({ companyId: ctx.companyId }, { workOrderId: 1, workStatus: 1 })
+        .lean();
+      const seen = new Map();
+      for (const w of all) seen.set(w.workOrderId, (seen.get(w.workOrderId) ?? 0) + 1);
+      const wo = all.find((w) => w.workStatus === 'Open' && seen.get(w.workOrderId) === 1);
+      // Seeded work orders all carry assignees; this one starts unassigned, like the user's WO-163.
+      await getModule('workorders').Model.updateOne({ _id: wo._id }, { $set: { people: [] } });
+      return `Assign whoever is free to ${wo.workOrderId}`;
+    },
+    tools: ['assign_work_order'],
+    blocks: ['confirm'],
+    confirm: true,
+    after: ['assign_work_order'],
+    check: (sse, text) => {
+      const args = sse.of('tool_call')[0]?.args ?? {};
+      const code = text.split(' ').at(-1);
+      return args.workOrder === code && args.people === 'auto' ? [] : [`args ${JSON.stringify(args)}`];
+    },
+    mentions: /Done: WO-\d+ is assigned to/,
+  },
+  {
+    name: 'D-4 KPI of anomalies for the last 3 days (confirm)',
+    demo: true,
+    text: 'Make a KPI of anomalies for last 3 days',
+    tools: ['create_kpi'],
+    blocks: ['confirm'],
+    confirm: true,
+    after: ['create_kpi'],
+    check: (sse) => {
+      const def = sse.of('tool_call')[0]?.args ?? {};
+      return def.timeRange?.text === 'last 3 days' && def.sources?.[0]?.args?.module === 'anomalies'
+        ? []
+        : [`kpi ${JSON.stringify({ timeRange: def.timeRange, source: def.sources?.[0]?.tool })}`];
+    },
+    mentions: /KPI Builder/,
+  },
+  {
+    name: 'D-5 energy consumption today, no machine named (all metered machines)',
+    demo: true,
+    text: 'Energy consumption today',
+    tools: ['resolve_time_range', 'mongo_find', 'energy_consumption', '...'],
+    check: (sse) => {
+      const ids = sse.of('tool_call').find((c) => c.name === 'energy_consumption')?.args.assetIds ?? [];
+      return ids.length > 1 ? [] : [`energy_consumption got ${ids.length} assetIds`];
+    },
+    mentions: /kWh/,
+  },
+  {
+    name: 'D-6 production of Bracket-C today (job cards by part)',
+    demo: true,
+    text: 'Production of Bracket-C today',
+    tools: ['resolve_time_range', 'mongo_find', '...'],
+    check: (sse) => {
+      const find = sse.of('tool_call').find((c) => c.name === 'mongo_find')?.args ?? {};
+      return find.module === 'jobcards' && find.filter?.partName === 'Bracket-C'
+        ? []
+        : ['no Bracket-C filter'];
+    },
+    mentions: /Bracket-C/,
+  },
+  {
+    name: 'D-7 open WO-42 (the module is inferred from the code)',
+    demo: true,
+    text: 'Open WO-42',
+    tools: ['open_page'],
+    blocks: ['navigate'],
+    check: (sse) => {
+      const args = sse.of('tool_call')[0]?.args ?? {};
+      return args.page === 'record' && args.module === 'workorders' && args.recordId === 'WO-42'
+        ? []
+        : [`open_page ${JSON.stringify(args)}`];
+    },
+    mentions: /Opened \*\*WO-42/,
+  },
+  {
+    name: 'D-8 monthly PM for Furnace 2 cleaning (confirm)',
+    demo: true,
+    text: 'Create a monthly PM for Furnace 2 cleaning',
+    tools: ['resolve', 'create_record'],
+    blocks: ['confirm'],
+    confirm: true,
+    after: ['create_record'],
+    check: (sse) => {
+      const call = sse.of('tool_call').find((c) => c.name === 'create_record')?.args ?? {};
+      const item = call.items?.[0] ?? {};
+      return call.module === 'preventivemaintenances' &&
+        item.trigger?.cycle?.duration === 'Months' &&
+        item.assetAllocation &&
+        /Cleaning – Furnace 2/.test(item.name)
+        ? []
+        : [`pm ${JSON.stringify({ module: call.module, name: item.name, trigger: item.trigger })}`];
+    },
+    mentions: /Done: \*\*\[PM-\d+.*every month/,
+  },
 ];
+
+/** The streamed answer text of a turn (the `delta` events). */
+const said = (sse) =>
+  sse
+    .of('delta')
+    .map((d) => d.text ?? '')
+    .join('');
 
 /** Compares the called tool names with the expectation; `'...'` matches any tail. */
 const sameSequence = (got, want) => {
@@ -822,6 +969,10 @@ const run = async () => {
   let conversation = null;
   const failures = [];
   for (const c of CASES) {
+    if (c.skipUnless && !c.skipUnless()) {
+      console.log(`skip ${c.name} (its tool is not registered yet)`);
+      continue;
+    }
     const problems = [];
     const ctx = await ctxFor(c.who ?? 'owner_1@acme.test');
     clearScripts();
@@ -834,7 +985,8 @@ const run = async () => {
     }
     const sse = recorder();
     const started = Date.now();
-    let outcome = await runTurn({ ctx, conversation, userText: c.text, sse, context: c.context });
+    const text = typeof c.text === 'function' ? await c.text(ctx) : c.text;
+    let outcome = await runTurn({ ctx, conversation, userText: text, sse, context: c.context });
     const toolNames = sse.of('tool_call').map((e) => e.name);
     if (!sameSequence(toolNames, c.tools))
       problems.push(`tools ${toolNames.join(' → ')} ≠ ${c.tools.join(' → ')}`);
@@ -853,6 +1005,8 @@ const run = async () => {
       if (userTexts < c.historyTurns)
         problems.push(`history has ${userTexts} user turns, expected ${c.historyTurns}`);
     }
+    // `check(sse)` → problems about the tool arguments or the streamed text (decided fields, language).
+    if (c.check) problems.push(...c.check(sse, text));
     if (c.confirm) {
       const confirm = sse.of('block').find((b) => b.type === 'confirm');
       if (outcome.status !== 'awaiting_confirmation' || !confirm)

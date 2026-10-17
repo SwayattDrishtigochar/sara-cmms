@@ -35,6 +35,9 @@ const schema = z.object({
   SESSION_TTL_HOURS: int(24),
   SUPERADMIN_EMAIL: str('superadmin@swayatt.com'),
   SUPERADMIN_PASSWORD: str('Admin@SARA-2026'),
+  // Demo mode: the login page lists the accounts at DEMO_DOMAIN and signs them in with one click. Never in production.
+  DEMO_MODE: bool(),
+  DEMO_DOMAIN: str('swayatt.com'),
 
   INFLUX_URL: str(''),
   INFLUX_TOKEN: str(''),
@@ -54,7 +57,7 @@ const schema = z.object({
   GEMINI_FALLBACK_VOICE: str('gemini-2.5-flash-native-audio-preview-12-2025'),
 
   MAX_ROWS: int(200),
-  MAX_TOOL_ITERATIONS: int(6),
+  MAX_TOOL_ITERATIONS: int(10),
   MAX_TURN_MS: int(90000),
   TOOL_TIMEOUT_MS: int(20000),
   HISTORY_TURNS: int(12),

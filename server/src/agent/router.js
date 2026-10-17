@@ -38,8 +38,9 @@ export const tierFor = (d) => {
   return 'balanced';
 };
 
+// Hinglish and Hindi verbs too ("banao", "बनाओ"); \b does not work next to Devanagari, so those sit outside it.
 const WRITE =
-  /\b(create|add|raise|open a|update|change|set|mark|assign|reassign|close|complete|delete|remove|rename|comment|note:|alert me)\b/;
+  /\b(create|add|raise|open a|update|change|set|mark|assign|reassign|close|complete|delete|remove|rename|comment|note:|alert me|banao|bana do|banaiye|hatao|hata do|badlo|badal do|lagao|laga do)\b|बनाओ|बना दो|हटाओ|हटा दो|बदलो|बदल दो|लगाओ|लगा दो/;
 const INTENT_RULES = [
   [
     'smalltalk',
@@ -64,7 +65,7 @@ const INTENT_RULES = [
 ];
 const GROUP_HINTS = {
   maintenance:
-    /\b(work ?orders?|wo-?\d*|pms?\b|preventive|calibrations?|spares?|parts?|stock|maintenance|technician|overdue|due)\b/,
+    /\b(work ?orders?|wo-?\d*|pms?\b|preventive|calibrations?|spares?|parts?|stock|maintenance|technician|overdue|due)\b|वर्क ऑर्डर/,
   production:
     /\b(job ?cards?|jc-?\d*|rejections?|rejected|downtime|stopped|oee|production|produced|shift output|target)\b/,
   telemetry:

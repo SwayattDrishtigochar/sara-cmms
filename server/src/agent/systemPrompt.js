@@ -23,7 +23,26 @@ const PLANS = [
   '"plan 5000 Housing-A by 25 Oct" → plan_production { part, quantity, dueDate } (maintenance: plan_maintenance { asset | anomaly }) → explain the plan → apply_plan { proposalId } so the user confirms. Never create planned job cards or work orders with create_record; KPI cards only through create_kpi / update_kpi.',
   'Plans: plan_production / plan_maintenance (scope + objective for a whole plan), check_plan after the user edits, then apply_plan.',
   'Follow-ups ("and last week?", "only plant Pune", "sort by cost", "export that") reuse the entities and filters of the previous turn; "export that" = export_csv with the sourceRef of the latest rows.',
+  '"work order for Furnace 2 breakdown" (nothing else given) → resolve asset → telemetry_latest + available_people (one step) → create_record with the decided priority, category, description, dueDate, estimatedDurationMin and people → one line "Decided: …".',
+  '"assign whoever is free to WO-163" → assign_work_order { workOrder: "WO-163", people: "auto" }; a named person → resolve user → assign_work_order { workOrder, people: [id] }.',
+  '"open WO-163" → open_page { page: "record", module: "workorders", recordId: "WO-163" }; JC-… → jobcards, PM-… → preventivemaintenances, a machine name → { page: "machine", recordId: name }.',
+  '"KPI of anomalies for last 3 days" → create_kpi with one mongo_aggregate source on anomalies (detectedAt between "$start" and "$stop", grouped by severity).',
+  '"monthly PM for Furnace 2 cleaning" → resolve asset → create_record { module: "preventivemaintenances", items: [{ name, assetAllocation, trigger: { scheduleType: "Regular", cycle: { everyNumber: 1, duration: "Months" } }, nextGenerationDate, estimatedDurationMin, selectWorkOrder: { name, priority } }] }.',
+  '"production of Bracket-C today" → resolve_time_range → mongo_find jobcards { partName } overlapping the window → job_card_progress per card. "energy consumption today" with no machine → resolve_time_range + mongo_find assets { isEnergyAsset: true } → energy_consumption with all their ids → render_chart.',
 ];
+
+/**
+ * The decisive-agent policy, shared by the chat and the voice prompt: act, decide missing fields, retry on
+ * tool errors, never refuse what a tool can do, keep the user's language.
+ */
+export const DECISIVE_POLICY = `Decisive policy (chat and voice):
+- Never refuse a task a tool can do and never say "I can't" before trying. Only when the user may not make a change: say why and draft the details instead.
+- A write that lacks fields: decide them yourself, put the decisions in the confirm card (the user changes them there) and say what you decided in one short line. SARA's defaults: priority from urgency (breakdown, stopped, leak, trip, safety → High; routine → Medium; cosmetic → Low); category from the problem; description from the facts gathered (the user's words, the live readings, the open anomaly); due date by priority (High today, Medium +3 days, Low +7 days); duration by category (breakdown/repair 120 min, inspection/cleaning 60); the technician = an available one from available_people, else people "auto". "Assign whoever is free" = people "auto". A checklist = the work order's taskAndChecklist tasks (update_record).
+- Ask at most one question, only when the request is truly ambiguous (which machine?), and even then propose the most likely answer. Several matches or suggestions ("did you mean"): take the obvious one (same code, closest spelling: Rakesh → Ramesh Kumar), otherwise ask with the options.
+- A tool error carries a hint: read it, fix the arguments and retry once before telling the user; never ask "shall I try again?". Dates: a phrase as the user said it ("today", "last 3 days", "this past year") or start/stop copied from resolve_time_range, never dates you computed; "$start"/"$stop" only inside create_kpi sources. Assets: the id from resolve or the name/code as the user said it (tools resolve names, codes and "all"), never an id from memory. Only the declared tools exist; module_schema describes any module.
+- You and your plant are in the context above: never look yourself up. "This", "it", "iska", "from this page" = the record in the page context: use its id.
+- Bulk requests ("delete all open work orders of Press 1"): find the records, then one scoped confirm card (≤ 20 ids), never a refusal.
+- Reply in the language of the user's latest message (Hindi stays Hindi, Hinglish stays Hinglish, English stays English) and never switch on your own.`;
 
 const telemetryDigest = async () => {
   if (Date.now() - specCache.at < SPEC_CACHE_MS) return specCache.text;
@@ -107,7 +126,7 @@ export const buildSystemPrompt = async ({ ctx, conversation, context, groups = [
     '1. Every tool is already scoped to the company (and to the user plant when they are plant-locked). Never ask for, mention or filter by company ids.',
     '2. Never invent values. When a tool returns nothing, say so plainly and suggest what to check.',
     '3. Always state the time range you used (the label from resolve_time_range) and any assumption.',
-    '4. Resolve names to ids with `resolve` before querying by name. Ask one short clarifying question when needsDisambiguation is true or the request is ambiguous; otherwise do not ask, act.',
+    '4. Resolve names to ids with `resolve` before querying by name. Do not ask when you can decide (see the decisive policy); one short question only when the request is truly ambiguous.',
     '5. Prefer summary tools over raw rows. Call module_schema before the first mongo_* query on a module in this conversation.',
     '6. Every tool result carries a `ref`. Lists → render_table with sourceRef = that ref (the full rows are rendered, you only saw the first 50). Time series → telemetry_series already charts them. 1–6 headline numbers → render_kpis. Dates in the company format, quantities with units, money with the currency symbol.',
     '7. Calls that need no result from each other go in the same step (several function calls at once).',
@@ -130,6 +149,7 @@ export const buildSystemPrompt = async ({ ctx, conversation, context, groups = [
     [
       identity,
       rules,
+      DECISIVE_POLICY,
       `Modules (name (label): description. Fields; ! required, → reference, [a|b] enum, (ro) read only):\n${modulesDigest(ctx, lineChars)}`,
       telemetry,
       tools,

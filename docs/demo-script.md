@@ -7,10 +7,10 @@ Re-checked on 2026-10-17 (phase-7 gate, server stable, AI_MOCK=true): bearing we
 
 ## Before the judges arrive (T-10 min)
 
-1. The simulator runs: `cd sara-simulator && node src/index.js`. The server runs: `cd sara/server && npm run dev`. The client runs: `cd sara/client && npm run dev`, then open http://localhost:5173.
+1. `DEMO_MODE=true` in `sara/.env`, so the login page lists the demo accounts: click a person to sign in as them, no password. The simulator runs: `cd sara-simulator && node src/index.js`. The server runs: `cd sara/server && npm run dev`. The client runs: `cd sara/client && npm run dev`, then open http://localhost:5173.
 2. Open two browser windows side by side, or two profiles:
-   - **Window A, two tabs**: the simulator's control panel at http://localhost:5090 (password: SIM_UI_PASSWORD from `sara-simulator/.env`), and SARA as `superadmin@swayatt.com` with the SUPERADMIN_PASSWORD from `sara/.env`.
-   - **Window B, owner**: `owner_1@swayatt.com` / `Sara@12345` (Vikram Mehta, Managing Director).
+   - **Window A, two tabs**: the simulator's control panel at http://localhost:5090 (password: SIM_UI_PASSWORD from `sara-simulator/.env`), and SARA as `superadmin@swayatt.com` with the SUPERADMIN_PASSWORD from `sara/.env` (the superadmin is never in the demo list).
+   - **Window B, owner**: click **Vikram Mehta** (Owner, Managing Director) in Demo accounts; without demo mode, `owner_1@swayatt.com` / `Sara@12345`.
 3. In Window A, on the control panel, open Controls:
    - Simulation running: on.
    - Machine readings every 5 s.
@@ -19,7 +19,7 @@ Re-checked on 2026-10-17 (phase-7 gate, server stable, AI_MOCK=true): bearing we
    - In Active injections, click **Clear all** so the lab starts empty.
 4. In the SARA tab of Window A, Superadmin → AI: **Open a work order automatically** on, **After consecutive scans** 2, **Minimum severity** Warning (the defaults), then Save. Switch it off instead if you want to click **Create work order** yourself in step 7:00.
 5. In Window B, click **Regenerate** at the bottom of the SARA briefing so the text matches the live numbers.
-6. Keep a third tab logged in as `viewer_1@swayatt.com` / `Sara@12345` for the last minute.
+6. Keep a third tab signed in as the viewer (`viewer_1@swayatt.com`, the last card in Demo accounts) for the last minute.
 
 ## 0:00 to 1:00: Simulator control panel (Window A)
 

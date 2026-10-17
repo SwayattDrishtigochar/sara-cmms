@@ -11,6 +11,8 @@ import { PlanHeader, VerdictCard } from './PlanHeader.jsx';
 import { PlannerPage } from './PlannerPage.jsx';
 
 const H = 36e5;
+// Frozen clock, 03:00 IST on Thu 15 Oct 2026: at(3) to at(11) is exactly shift A (06:00-14:00 IST) at any time of day.
+vi.useFakeTimers({ toFake: ['Date'], now: new Date('2026-10-14T21:30:00.000Z') });
 const NOW = Date.now();
 const at = (h) => new Date(NOW + h * H).toISOString();
 

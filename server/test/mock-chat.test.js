@@ -177,3 +177,218 @@ describe('mock chat refused tools', () => {
     expect(other.text).not.toMatch(/Kavita|hint|Explain this/);
   });
 });
+
+describe('mock chat decides the fields of a plain ask', () => {
+  const turn = (name, args, response) => [
+    { role: 'model', parts: [{ functionCall: { name, args } }] },
+    { role: 'user', parts: [{ functionResponse: { name, response } }] },
+  ];
+  const furnace = turn(
+    'resolve',
+    { kind: 'asset', query: 'Furnace 2' },
+    { result: { matches: [{ id: 'f2', label: 'FUR-02 · Furnace 2' }] } },
+  );
+  const gathered = (people, live) => [
+    {
+      role: 'model',
+      parts: [
+        { functionCall: { name: 'available_people', args: {} } },
+        { functionCall: { name: 'telemetry_latest', args: { assetIds: ['f2'] } } },
+      ],
+    },
+    {
+      role: 'user',
+      parts: [
+        { functionResponse: { name: 'available_people', response: people } },
+        { functionResponse: { name: 'telemetry_latest', response: live } },
+      ],
+    },
+  ];
+  const facts = gathered(
+    { result: { rows: [{ id: 'u7', name: 'Ramesh Kumar' }] } },
+    { result: { rows: [{ asset: 'Furnace 2', status: 'Stopped', currentTemp: 619.4 }] } },
+  );
+  const plain = 'Create a work order for Furnace 2 breakdown';
+
+  it('work order for Furnace 2 breakdown: resolve → who is free + live reading → decided fields → confirm', () => {
+    expect(demoStep({ text: plain, history: [] }).calls).toEqual([
+      { name: 'resolve', args: { kind: 'asset', query: 'Furnace 2' } },
+    ]);
+    expect(demoStep({ text: plain, history: furnace }).calls).toEqual([
+      { name: 'available_people', args: {} },
+      { name: 'telemetry_latest', args: { assetIds: ['f2'] } },
+    ]);
+    const draft = demoStep({ text: plain, history: [...furnace, ...facts] });
+    expect(draft.calls[0].name).toBe('create_record');
+    const [item] = draft.calls[0].args.items;
+    expect(item).toMatchObject({
+      name: 'Breakdown – Furnace 2',
+      asset: 'f2',
+      priority: 'High',
+      category: 'Breakdown',
+      estimatedDurationMin: 120,
+      people: ['u7'],
+    });
+    expect(item.dueDate).toMatch(/^\d{4}-/);
+    expect(item.description).toMatch(/Live now: status Stopped, currentTemp 619\.4/);
+    expect(draft.text).toMatch(
+      /^Decided: priority High \(breakdown\), category Breakdown, due today, 120 min, assigned to Ramesh Kumar \(free now\)\. Change anything in the card, then confirm\./,
+    );
+  });
+
+  it('drafts without an assignee or readings when those tools fail, instead of giving up', () => {
+    const failed = gathered(
+      { error: 'Unknown tool "available_people"' },
+      { error: 'InfluxDB is not configured' },
+    );
+    const draft = demoStep({ text: plain, history: [...furnace, ...failed] });
+    expect(draft.calls[0].name).toBe('create_record');
+    expect(draft.calls[0].args.items[0].people).toBeUndefined();
+    expect(draft.calls[0].args.items[0].description).toBe('Breakdown on Furnace 2. Raised from SARA chat.');
+    expect(draft.text).toMatch(
+      /^Decided: priority High \(breakdown\), category Breakdown, due today, 120 min\./,
+    );
+  });
+
+  it.each([
+    [
+      'Furnace 2 ke liye breakdown work order banao',
+      /^Maine tay kiya: priority High \(breakdown\), category Breakdown, aaj tak, 120 min, Ramesh Kumar ko assign \(abhi free\)\. Card mein kuch bhi badal sakte hain, phir confirm karein\.$/,
+      /^Ho gaya: \*\*\[WO-9[^\]]*\]\(\/wo\)\*\* ban gaya Furnace 2 ke liye, Ramesh Kumar ko assign\.$/,
+    ],
+    [
+      'Furnace 2 के लिए breakdown work order बनाओ',
+      /^मैंने तय किया: priority High \(breakdown\), category Breakdown, आज तक, 120 min, Ramesh Kumar को assign \(अभी free\)। कार्ड में कुछ भी बदलें, फिर confirm करें।$/,
+      /^हो गया: \*\*\[WO-9[^\]]*\]\(\/wo\)\*\* बन गया Furnace 2 के लिए, Ramesh Kumar को assign।$/,
+    ],
+  ])('"%s" is answered in the same language', (text, decided, done) => {
+    expect(demoStep({ text, history: [] }).calls[0]).toEqual({
+      name: 'resolve',
+      args: { kind: 'asset', query: 'Furnace 2' },
+    });
+    const draft = demoStep({ text, history: [...furnace, ...facts] });
+    expect(draft.calls[0].args.items[0]).toMatchObject({ name: 'Breakdown – Furnace 2', priority: 'High' });
+    expect(draft.text).toMatch(decided);
+    const made = turn(
+      'create_record',
+      {},
+      { status: 'confirmed', result: { created: [{ label: 'WO-9 · Breakdown – Furnace 2', link: '/wo' }] } },
+    );
+    expect(demoStep({ text, history: [...furnace, ...facts, ...made] }).text.trim()).toMatch(done);
+  });
+
+  it('assigns whoever is free with people "auto", and a named person by id (did you mean)', () => {
+    const auto = demoStep({ text: 'Assign whoever is free to WO-163', history: [] });
+    expect(auto.calls).toEqual([
+      { name: 'assign_work_order', args: { workOrder: 'WO-163', people: 'auto' } },
+    ]);
+    expect(auto.text).toMatch(/^Decided: whoever is free now takes WO-163\./);
+    const named = 'Assign WO-163 to Rakesh Kumar';
+    expect(demoStep({ text: named, history: [] }).calls).toEqual([
+      { name: 'resolve', args: { kind: 'user', query: 'Rakesh Kumar' } },
+    ]);
+    // One "did you mean" suggestion is taken as the answer; several are offered.
+    const one = turn(
+      'resolve',
+      { kind: 'user', query: 'Rakesh Kumar' },
+      { result: { matches: [], suggestions: [{ id: 'u7', label: 'Ramesh Kumar' }] } },
+    );
+    expect(demoStep({ text: named, history: one }).calls).toEqual([
+      { name: 'assign_work_order', args: { workOrder: 'WO-163', people: ['u7'] } },
+    ]);
+    const two = turn(
+      'resolve',
+      { kind: 'user', query: 'Rakesh Kumar' },
+      {
+        result: {
+          matches: [],
+          suggestions: [
+            { id: 'u7', label: 'Ramesh Kumar' },
+            { id: 'u8', label: 'Rakesh Jain' },
+          ],
+        },
+      },
+    );
+    expect(demoStep({ text: named, history: two }).text).toBe(
+      'I couldn\'t find "Rakesh Kumar". Did you mean Ramesh Kumar and Rakesh Jain?',
+    );
+    const done = turn(
+      'assign_work_order',
+      {},
+      { status: 'confirmed', result: { assigned: [{ name: 'Ramesh Kumar' }] } },
+    );
+    expect(demoStep({ text: 'Assign whoever is free to WO-163', history: done }).text).toMatch(
+      /Done: WO-163 is assigned to Ramesh Kumar\./,
+    );
+  });
+
+  it('builds an anomalies KPI over the asked range', () => {
+    const def = demoStep({ text: 'Make a KPI of anomalies for last 3 days', history: [] }).calls[0];
+    expect(def.name).toBe('create_kpi');
+    expect(def.args).toMatchObject({
+      title: 'Anomalies by severity',
+      viz: 'bar',
+      timeRange: { text: 'last 3 days' },
+    });
+    expect(def.args.sources[0]).toMatchObject({ tool: 'mongo_aggregate', args: { module: 'anomalies' } });
+    expect(JSON.stringify(def.args.sources[0].args.pipeline)).toContain('"$gte":"$start"');
+  });
+
+  it('reads the production of a part through its job cards', () => {
+    const text = 'Production of Bracket-C today';
+    expect(demoStep({ text, history: [] }).calls).toEqual([
+      { name: 'resolve_time_range', args: { text: 'today' } },
+    ]);
+    const window = turn(
+      'resolve_time_range',
+      { text: 'today' },
+      { result: { start: 'S', stop: 'E', label: 'Today (17-10-2026)' } },
+    );
+    const find = demoStep({ text, history: window }).calls[0];
+    expect(find).toMatchObject({
+      name: 'mongo_find',
+      args: {
+        module: 'jobcards',
+        filter: { partName: 'Bracket-C', startDate: { $lt: 'E' }, endDate: { $gte: 'S' } },
+      },
+    });
+    const cards = turn('mongo_find', find.args, {
+      result: { rows: [{ jobCardId: 'JC-7' }, { jobCardId: 'JC-9' }] },
+    });
+    expect(demoStep({ text, history: [...window, ...cards] }).calls).toEqual([
+      { name: 'job_card_progress', args: { jobCard: 'JC-7' } },
+      { name: 'job_card_progress', args: { jobCard: 'JC-9' } },
+    ]);
+    const none = turn('mongo_find', find.args, { result: { rows: [] } });
+    expect(demoStep({ text, history: [...window, ...none] }).text).toBe(
+      'No job card for **Bracket-C** ran today (17-10-2026).',
+    );
+  });
+
+  it('opens a record from its code alone, and a monthly PM gets its cycle and template', () => {
+    expect(demoStep({ text: 'Open WO-163', history: [] }).calls).toEqual([
+      { name: 'open_page', args: { page: 'record', module: 'workorders', recordId: 'WO-163' } },
+    ]);
+    expect(demoStep({ text: 'open JC-14', history: [] }).calls[0].args.module).toBe('jobcards');
+    const text = 'Create a monthly PM for Furnace 2 cleaning';
+    expect(demoStep({ text, history: [] }).calls[0]).toEqual({
+      name: 'resolve',
+      args: { kind: 'asset', query: 'Furnace 2' },
+    });
+    const pm = demoStep({ text, history: furnace });
+    expect(pm.calls[0].name).toBe('create_record');
+    expect(pm.calls[0].args.module).toBe('preventivemaintenances');
+    expect(pm.calls[0].args.items[0]).toMatchObject({
+      name: 'Cleaning – Furnace 2',
+      assetAllocation: 'f2',
+      estimatedDurationMin: 60,
+      trigger: { scheduleType: 'Regular', cycle: { everyNumber: 1, duration: 'Months' } },
+      selectWorkOrder: { name: 'Cleaning – Furnace 2', priority: 'Medium' },
+    });
+    expect(pm.text).toMatch(
+      /^Decided: every month, first due in 30 days, 60 min, Medium priority work orders\./,
+    );
+    const fortnight = demoStep({ text: 'Set up a PM every 2 weeks for Press 1 belt check', history: [] });
+    expect(fortnight.calls[0]).toEqual({ name: 'resolve', args: { kind: 'asset', query: 'Press 1' } });
+  });
+});

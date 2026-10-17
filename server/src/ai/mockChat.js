@@ -42,6 +42,13 @@ const list = (items) =>
   items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}` : (items[0] ?? '');
 const call = (name, args = {}) => ({ name, args });
 const step = (thought, ...calls) => ({ thought, calls });
+const DEVANAGARI = /[ऀ-ॿ]/;
+const HINGLISH =
+  /\b(banao|bana do|banaiye|kar do|karo|kijiye|ke liye|dikhao|batao|chahiye|kaun|kitne|kya|hai|abhi)\b/i;
+/** 'hi' (Devanagari), 'hinglish' (Roman Hindi) or 'en': the answer stays in the user's language. */
+export const langOf = (text) => (DEVANAGARI.test(text) ? 'hi' : HINGLISH.test(text) ? 'hinglish' : 'en');
+/** `words[lang]`, falling back to English. */
+const say = (lang, words) => words[lang] ?? words.en;
 const REFUSED = /^(\w+) is not available to .+ \(role (\w+)\)$/;
 /** A tool error in words for the user: a tool the role may not use is explained, not echoed. */
 const errorText = (r) => {
@@ -81,6 +88,7 @@ const stateOf = (text, calls, system = '') => {
   return {
     text,
     t: text.toLowerCase(),
+    lang: langOf(text),
     calls,
     page: page?.[1] ?? null,
     record: page?.[3] ? { module: page[3], id: page[4], label: page[2] } : null,
@@ -94,9 +102,11 @@ const stateOf = (text, calls, system = '') => {
   };
 };
 
-/** First match of a resolve call (asset by default), or null. */
-const matchOf = (s, query) =>
-  s.calls.find((c) => c.name === 'resolve' && c.args.query === query)?.response?.result?.matches?.[0] ?? null;
+/** First match of a resolve call, else its single "did you mean" suggestion (Rakesh → Ramesh Kumar), or null. */
+const matchOf = (s, query) => {
+  const r = s.calls.find((c) => c.name === 'resolve' && c.args.query === query)?.response?.result;
+  return r?.matches?.[0] ?? (r?.suggestions?.length === 1 ? r.suggestions[0] : null);
+};
 const machineId = (s, name) => matchOf(s, name)?.id ?? (s.record?.module === 'assets' ? s.record.id : null);
 const machineName = (s, name) =>
   matchOf(s, name)?.label?.split(' · ').pop() ??
@@ -258,6 +268,32 @@ const KPI_RECIPES = [
         },
       };
     },
+  },
+  {
+    re: /anomal/,
+    def: (s) => ({
+      title: 'Anomalies by severity',
+      description: 'Anomalies SARA detected in the period, by severity.',
+      viz: 'bar',
+      thresholds: { direction: 'lower_is_better' },
+      timeRange: { text: rangeIn(s.t, 'last 7 days') },
+      sources: [
+        {
+          key: 'anomalies',
+          tool: 'mongo_aggregate',
+          args: {
+            module: 'anomalies',
+            pipeline: [
+              { $match: { detectedAt: { $gte: '$start', $lt: '$stop' } } },
+              { $group: { _id: '$severity', count: { $sum: 1 } } },
+              { $project: { _id: 0, severity: '$_id', count: 1 } },
+              { $sort: { count: -1 } },
+            ],
+          },
+        },
+      ],
+      encoding: { source: 'anomalies', x: 'severity', series: [{ key: 'count', label: 'Anomalies' }] },
+    }),
   },
   {
     re: /work ?orders?/,
@@ -748,6 +784,44 @@ const bulkJobs = (text) => {
     .filter((p) => p && !/\b(priority|due|assign)/i.test(p));
 };
 
+/** SARA's defaults when the user gave no details: due by priority, duration by category. */
+const DUE_MS = { High: 8 * 3600e3, Medium: 3 * 86400e3, Low: 7 * 86400e3 };
+const DUE_WORDS = {
+  High: { en: 'due today', hinglish: 'aaj tak', hi: 'आज तक' },
+  Medium: { en: 'due in 3 days', hinglish: '3 din mein', hi: '3 दिन में' },
+  Low: { en: 'due in 7 days', hinglish: '7 din mein', hi: '7 दिन में' },
+};
+const DURATION_MIN = { Breakdown: 120, Electrical: 90, Hydraulic: 120, Mechanical: 120 };
+const URGENT = /\b(high|urgent|critical|breakdown|stopped|not working|safety|leak|trip)/;
+/** Words that are not the problem: verbs, articles, Hinglish particles and the details read elsewhere. */
+const WO_NOISE =
+  /\b(create|raise|open|log|add|new|please|sara|a|an|the|work|orders?|wo|for|on|at|in|of|to|me|it|banao|bana|banaiye|do|ke|liye|ka|ki|ko|ek|karo|kar|urgent(?:ly)?|high|medium|low|priority|asap|immediately|now|today|tomorrow)\b/gi;
+/** The problem named in a plain ask ("work order for Furnace 2 breakdown" → "breakdown"), or null. */
+const problemIn = (text) =>
+  text
+    .replace(ASSET, ' ')
+    .replace(/main incomer/i, ' ')
+    .replace(/[ऀ-ॿ]+/g, ' ')
+    .replace(WO_NOISE, ' ')
+    .replace(/[^\w\s-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() || null;
+/** The first free person of an available_people answer ({ id, name }), or null. */
+const freePerson = (r) => {
+  const p = (r?.rows ?? r?.people ?? r?.available ?? [])[0];
+  return p ? { id: p.id ?? p._id ?? p.userId, name: p.name ?? p.label ?? 'a free technician' } : null;
+};
+/** "status Stopped, CURRENT TEMP 619, …" from a telemetry_latest row, or ''. */
+const liveLine = (row) => {
+  if (!row) return '';
+  const nums = Object.entries(row)
+    .filter(([k, v]) => typeof v === 'number' && !/^(assetId|asOf)$/.test(k))
+    .slice(0, 3)
+    .map(([k, v]) => `${k} ${Number(Number(v).toFixed(1))}`);
+  const parts = [row.status ? `status ${row.status}` : '', ...nums].filter(Boolean);
+  return parts.length ? ` Live now: ${parts.join(', ')}.` : '';
+};
+
 const createWoFlow = (s) => {
   const name = assetIn(s.text.split(':')[0]) ?? assetIn(s.text);
   const jobs = bulkJobs(s.text);
@@ -766,25 +840,49 @@ const createWoFlow = (s) => {
   }
   const missing = names.find((n) => !matchOf(s, n));
   if (missing) return { text: `I couldn't find a machine called "${missing}".` };
-  const what =
-    /:\s*([^,.;]+)/.exec(s.text)?.[1] ??
-    /\bfor [^,]+?,\s*([^,.;]+)/.exec(s.text)?.[1] ??
-    `Inspection${name ? ` – ${machineName(s, name)}` : ''}`;
-  const user = person
-    ? s.calls.find((c) => c.args.query === person)?.response?.result?.matches?.[0]?.id
-    : null;
+  const described = /:\s*([^,.;]+)/.exec(s.text)?.[1] ?? /\bfor [^,]+?,\s*([^,.;]+)/.exec(s.text)?.[1];
+  const what = described ?? problemIn(s.text) ?? 'Inspection';
+  const id = machineId(s, name);
+  // Nothing said about the assignee or the problem: read who is free and what the machine shows right now,
+  // then decide the fields (the confirm card lets the user change them).
+  const single = jobs.length <= 1;
+  const gather = [
+    ...(single && !person ? [call('available_people', {})] : []),
+    ...(single && !described && id ? [call('telemetry_latest', { assetIds: [id] })] : []),
+  ];
+  if (gather.length && !s.has('available_people') && !s.has('telemetry_latest')) {
+    return step(
+      '**Deciding the details**\n\nWho is free right now, and what the machine shows live.',
+      ...gather,
+    );
+  }
+  const user = person ? matchOf(s, person)?.id : null;
+  const free = person ? null : freePerson(s.result('available_people'));
+  const live = described ? '' : liveLine(s.result('telemetry_latest')?.rows?.[0]);
   const day = due ? rangeOf(s) : null;
   const itemFor = (job, machine, words) => {
     const title = cap(job.trim()).slice(0, 120);
+    const category = CATEGORIES.find(([, re]) => re.test(words))?.[0] ?? 'Inspection';
+    const priority = /\b(high|urgent|critical)\b/.test(s.t)
+      ? 'High'
+      : /\blow\b/.test(s.t)
+        ? 'Low'
+        : URGENT.test(words)
+          ? 'High'
+          : 'Medium';
+    const dueDate = day?.stop
+      ? new Date(Date.parse(day.stop) - 1000).toISOString()
+      : new Date(Date.now() + DUE_MS[priority]).toISOString();
     return {
       name:
         machine && !title.includes(machineName(s, machine)) ? `${title} – ${machineName(s, machine)}` : title,
-      description: `${title}${machine ? ` on ${machineName(s, machine)}` : ''}. Raised from SARA chat.`,
+      description: `${title}${machine ? ` on ${machineName(s, machine)}` : ''}.${live} Raised from SARA chat.`,
       ...(machine ? { asset: machineId(s, machine) } : {}),
-      priority: /\b(high|urgent|critical)\b/.test(s.t) ? 'High' : /\blow\b/.test(s.t) ? 'Low' : 'Medium',
-      category: CATEGORIES.find(([, re]) => re.test(words))?.[0] ?? 'Inspection',
-      ...(day?.stop ? { dueDate: new Date(Date.parse(day.stop) - 1000).toISOString() } : {}),
-      ...(user ? { people: [user] } : {}),
+      priority,
+      category,
+      dueDate,
+      estimatedDurationMin: DURATION_MIN[category] ?? 60,
+      ...(user ? { people: [user] } : free ? { people: [free.id] } : {}),
     };
   };
   if (!s.has('create_record')) {
@@ -796,11 +894,24 @@ const createWoFlow = (s) => {
           })
         : [itemFor(what, name, s.t)];
     const many = items.length > 1;
+    const it = items[0];
+    const why =
+      it.priority === 'High' && !/\b(high|urgent|critical)\b/.test(s.t) ? ` (${what.toLowerCase()})` : '';
+    const who = user ? person : free?.name;
+    const decided = say(s.lang, {
+      en: `Decided: priority ${it.priority}${why}, category ${it.category}, ${day ? `due ${lc(day.label)}` : DUE_WORDS[it.priority].en}, ${it.estimatedDurationMin} min${who ? `, assigned to ${who}${free ? ' (free now)' : ''}` : ''}. Change anything in the card, then confirm.`,
+      hinglish: `Maine tay kiya: priority ${it.priority}${why}, category ${it.category}, ${day ? `due ${lc(day.label)}` : DUE_WORDS[it.priority].hinglish}, ${it.estimatedDurationMin} min${who ? `, ${who} ko assign${free ? ' (abhi free)' : ''}` : ''}. Card mein kuch bhi badal sakte hain, phir confirm karein.`,
+      hi: `मैंने तय किया: priority ${it.priority}${why}, category ${it.category}, ${day ? `due ${lc(day.label)}` : DUE_WORDS[it.priority].hi}, ${it.estimatedDurationMin} min${who ? `, ${who} को assign${free ? ' (अभी free)' : ''}` : ''}। कार्ड में कुछ भी बदलें, फिर confirm करें।`,
+    });
     return {
       thought: `**Drafting the work order${many ? 's' : ''}**\n\nEverything resolved; it waits for your confirmation.`,
       text: many
         ? `Here are the ${items.length} work orders. Confirm to create them.`
-        : 'Here is the work order. Confirm to create it.',
+        : say(s.lang, {
+            en: `${decided}\n\nHere is the work order. Confirm to create it.`,
+            hinglish: decided,
+            hi: decided,
+          }),
       calls: [call('create_record', { module: 'workorders', items })],
     };
   }
@@ -808,10 +919,111 @@ const createWoFlow = (s) => {
   if (created.length > 1) {
     return { text: `Done: ${list(created.map((c) => `**[${c.label}](${c.link})**`))} are open.` };
   }
+  if (!created[0]) {
+    return {
+      text: say(s.lang, {
+        en: 'The work order was not created.',
+        hinglish: 'Work order nahi bana.',
+        hi: 'Work order नहीं बना।',
+      }),
+    };
+  }
+  const link = `**[${created[0].label}](${created[0].link})**`;
+  const machine = name ? machineName(s, name) : null;
+  const who = user ? person : free?.name;
   return {
-    text: created[0]
-      ? `Done: **[${created[0].label}](${created[0].link})** is open${name ? ` for ${machineName(s, name)}` : ''}${person ? `, assigned to ${person}` : ''}.\n\n**Next:** shall I find a maintenance window for it? Say "Plan maintenance for ${name ?? 'it'}".`
-      : 'The work order was not created.',
+    text: say(s.lang, {
+      en: `Done: ${link} is open${machine ? ` for ${machine}` : ''}${who ? `, assigned to ${who}` : ''}.\n\n**Next:** shall I find a maintenance window for it? Say "Plan maintenance for ${name ?? 'it'}".`,
+      hinglish: `Ho gaya: ${link} ban gaya${machine ? ` ${machine} ke liye` : ''}${who ? `, ${who} ko assign` : ''}.`,
+      hi: `हो गया: ${link} बन गया${machine ? ` ${machine} के लिए` : ''}${who ? `, ${who} को assign` : ''}।`,
+    }),
+  };
+};
+
+/** "Assign whoever is free to WO-163" → people "auto"; "assign WO-163 to Ramesh" → resolve → people [id]. */
+const assignFlow = (s) => {
+  const workOrder = codeIn(s.text, 'WO') ?? (s.record?.module === 'workorders' ? s.record.id : null);
+  const person = /\bto ([A-Z][a-z]+(?: [A-Z][a-z]+)?)\b/.exec(s.text.replace(/\bWO-\d+/g, ''))?.[1];
+  if (person && !s.has('resolve'))
+    return step(`**Finding ${person}**`, call('resolve', { kind: 'user', query: person }));
+  const user = person ? matchOf(s, person) : null;
+  if (person && !user) {
+    const options = s.result('resolve')?.suggestions?.map((m) => m.label) ?? [];
+    return {
+      text: options.length
+        ? `I couldn't find "${person}". Did you mean ${list(options)}?`
+        : `I couldn't find anyone called "${person}".`,
+    };
+  }
+  const label = s.record?.module === 'workorders' ? s.record.label : workOrder;
+  if (!s.has('assign_work_order')) {
+    return {
+      text: user
+        ? `Assigning ${label} to ${user.label?.split(' · ').pop() ?? person}. Confirm below.`
+        : `Decided: whoever is free now takes ${label}. Confirm below.`,
+      calls: [call('assign_work_order', { workOrder, people: user ? [user.id] : 'auto' })],
+    };
+  }
+  const r = s.result('assign_work_order') ?? {};
+  const names = (r.assigned ?? r.people ?? []).map((p) => p.name ?? p.label ?? p).filter(Boolean);
+  return { text: `Done: ${label} is assigned to ${names.length ? list(names) : 'the free technician'}.` };
+};
+
+const CYCLES = [
+  [/\b(daily|every day|har din|roz)\b/, [1, 'Days']],
+  [/\b(weekly|every week|har hafte)\b/, [1, 'Weeks']],
+  [/\b(quarterly|every quarter)\b/, [3, 'Months']],
+  [/\b(yearly|annual(?:ly)?|every year|har saal)\b/, [1, 'Years']],
+  [/\bevery (\d+) (days?|weeks?|months?|years?)\b/, (m) => [Number(m[1]), cap(m[2].replace(/s$/, ''))]],
+];
+const PM_NOISE =
+  /\b(pm|pms|preventive|maintenance|schedule|monthly|weekly|daily|yearly|quarterly|every|purpose)\b/gi;
+/** "Create a monthly PM for Furnace 2 cleaning" → one PM with its cycle, next due date and work order template. */
+const pmFlow = (s) => {
+  const name = assetIn(s.text);
+  if (name && !s.has('resolve'))
+    return step(`**Finding ${name}**`, call('resolve', { kind: 'asset', query: name }));
+  if (name && !matchOf(s, name)) return { text: `I couldn't find a machine called "${name}".` };
+  const asset = machineId(s, name);
+  const hit = CYCLES.find(([re]) => re.test(s.t));
+  const [every, unit] = hit
+    ? typeof hit[1] === 'function'
+      ? hit[1](hit[0].exec(s.t))
+      : hit[1]
+    : [1, 'Months'];
+  const job = cap(problemIn(s.text.replace(PM_NOISE, ' ')) ?? 'inspection');
+  const machine = machineName(s, name);
+  const unitMs = { Days: 86400e3, Weeks: 7 * 86400e3, Months: 30 * 86400e3, Years: 365 * 86400e3 }[unit];
+  const cycleWord = `${every === 1 ? '' : `${every} `}${every === 1 ? unit.toLowerCase().replace(/s$/, '') : unit.toLowerCase()}`;
+  const title = `${job}${machine ? ` – ${machine}` : ''}`;
+  if (!s.has('create_record')) {
+    const minutes = DURATION_MIN[CATEGORIES.find(([, re]) => re.test(s.t))?.[0]] ?? 60;
+    return {
+      text: `Decided: every ${cycleWord}, first due in ${every * (unitMs / 86400e3)} days, ${minutes} min, Medium priority work orders. Change anything in the card, then confirm.\n\nHere is the PM. Confirm to create it.`,
+      calls: [
+        call('create_record', {
+          module: 'preventivemaintenances',
+          items: [
+            {
+              name: title,
+              description: `${job}${machine ? ` of ${machine}` : ''} every ${cycleWord}. Created from SARA chat.`,
+              ...(asset ? { assetAllocation: asset } : {}),
+              isActive: true,
+              estimatedDurationMin: minutes,
+              nextGenerationDate: new Date(Date.now() + every * unitMs).toISOString(),
+              trigger: { scheduleType: 'Regular', cycle: { everyNumber: every, duration: unit } },
+              selectWorkOrder: { name: title, priority: 'Medium', dueDuration: { value: 1, unit: 'Days' } },
+            },
+          ],
+        }),
+      ],
+    };
+  }
+  const made = s.result('create_record')?.created?.[0];
+  return {
+    text: made
+      ? `Done: **[${made.label}](${made.link})** is active; it raises a work order every ${cycleWord}.`
+      : 'The PM was not created.',
   };
 };
 
@@ -1326,8 +1538,44 @@ const attendanceFlow = (s) => {
   );
 };
 
+/** A part name like "Bracket-C" or "Housing-A" in the text (codes such as WO-12 do not match), or null. */
+const partIn = (text) => /\b([A-Z][a-z]+(?: [A-Z][a-z]+)?-[A-Z0-9]\w*)\b/.exec(text)?.[1] ?? null;
+
+/** "Production of Bracket-C today": the job cards of that part in the window, then each card's progress. */
+const partFlow = (s, part) => {
+  const range = rangeIn(s.t, 'today');
+  if (!s.has('resolve_time_range'))
+    return step(`**Finding the ${part} job cards ${range}**`, call('resolve_time_range', { text: range }));
+  const w = rangeOf(s);
+  if (!s.has('mongo_find')) {
+    return step(
+      null,
+      call('mongo_find', {
+        module: 'jobcards',
+        filter: { partName: part, startDate: { $lt: w.stop }, endDate: { $gte: w.start } },
+        projection: ['jobCardId', 'jobName', 'asset', 'jobStatus', 'target'],
+        populate: ['asset'],
+        sort: 'startDate',
+        limit: 10,
+      }),
+    );
+  }
+  const cards = s.result('mongo_find')?.rows ?? [];
+  if (!cards.length) return { text: `No job card for **${part}** ran ${lc(w.label)}.` };
+  if (!s.has('job_card_progress'))
+    return step(null, ...cards.slice(0, 3).map((c) => call('job_card_progress', { jobCard: c.jobCardId })));
+  const progress = s.results('job_card_progress').filter(Boolean);
+  const good = progress.reduce((n, j) => n + (j.goodParts ?? 0), 0);
+  const target = progress.reduce((n, j) => n + (j.target ?? 0), 0);
+  return {
+    text: `**${part} ${lc(w.label)}: ${lakh(good)} of ${lakh(target)} good parts** across ${progress.length} job card${progress.length === 1 ? '' : 's'}.\n\n${progress.map((j) => `- **${j.jobCard}** on ${j.asset}: ${lakh(j.goodParts)} / ${lakh(j.target)} (${j.progressPct}%), ${j.onTrack ? 'on track' : 'behind plan'}, quality ${j.qualityPct}%`).join('\n')}`,
+  };
+};
+
 const jobFlow = (s) => {
   const jc = codeIn(s.text, 'JC');
+  const part = jc ? null : partIn(s.text);
+  if (part) return partFlow(s, part);
   if (jc) {
     if (!s.has('job_card_progress'))
       return step(`**Reading ${jc}**`, call('job_card_progress', { jobCard: jc }));
@@ -1448,9 +1696,15 @@ const navTarget = (s) => {
     return { page: 'list', module, ...(filters.length ? { filters } : {}) };
   }
   if (asset) return { page: 'machine', recordId: asset };
-  const wo = codeIn(s.text, 'WO');
-  return wo ? { page: 'record', module: 'workorders', recordId: wo } : null;
+  // A bare code says its module: WO-163 → work orders, JC-14 → job cards, PM-3 → preventive maintenance.
+  const coded = CODE_MODULES.map(([prefix, mod]) => [codeIn(s.text, prefix), mod]).find(([code]) => code);
+  return coded ? { page: 'record', module: coded[1], recordId: coded[0] } : null;
 };
+const CODE_MODULES = [
+  ['WO', 'workorders'],
+  ['JC', 'jobcards'],
+  ['PM', 'preventivemaintenances'],
+];
 const navigateFlow = (s) => {
   if (!s.has('open_page')) return step(null, call('open_page', navTarget(s)));
   const r = s.result('open_page') ?? {};
@@ -1487,6 +1741,12 @@ const FLOWS = [
   ],
   [
     (s) =>
+      /\b(create|add|set ?up|make|schedule|banao)\b.*\b(pm|preventive|calibration)\b/.test(s.t) ||
+      (/\b(pm|preventive)\b/.test(s.t) && /बनाओ|बना दो/.test(s.text)),
+    pmFlow,
+  ],
+  [
+    (s) =>
       /\bmaintenance\b|\banm-\d+|\bwindow\b|\bslot\b/.test(s.t) &&
       /\b(plan|schedule|find|when|book|slot|window)\b/.test(s.t),
     maintenanceFlow,
@@ -1497,13 +1757,23 @@ const FLOWS = [
   ],
   [(s) => /\b(delete|remove)\b/.test(s.t) && Boolean(targetOf(s)), deleteFlow],
   [
+    (s) =>
+      /\bassign|\ballot|लगा दो|को दो/i.test(s.text) &&
+      (/\bwo-\d+/.test(s.t) || s.record?.module === 'workorders'),
+    assignFlow,
+  ],
+  [
     (s) => /\bwo-\d+/.test(s.t) && STATUS.some(([, re]) => re.test(s.t)) && !/\bcomment\b/.test(s.t),
     woStatusFlow,
   ],
   [(s) => /\bwo-\d+/.test(s.t) && /\b(comment|note)\b/.test(s.t), commentFlow],
   [(s) => UPDATE.test(s.text) && Boolean(targetOf(s)), updateFlow],
   [
-    (s) => /\b(create|raise|open|log|add)\b.*\b(work ?orders?|breakdowns?)\b|\bwork order for\b/.test(s.t),
+    (s) =>
+      /\b(create|raise|open|log|add|banao|bana do|banaiye)\b.*\b(work ?orders?|breakdowns?)\b|\bwork ?orders?\b.*\b(banao|bana do|banaiye)\b|\bwork order for\b/.test(
+        s.t,
+      ) ||
+      (/work ?order|वर्क ऑर्डर/i.test(s.text) && /बनाओ|बना दो/.test(s.text)),
     createWoFlow,
   ],
   [(s) => /\b(cost|costs|spend|spent|expenses?|budget)\b/.test(s.t), costFlow],
@@ -1534,20 +1804,34 @@ const FLOWS = [
 ];
 
 /**
+ * Tools whose error the flow itself handles: the plan tools explain theirs, and the fact-gathering tools
+ * (who is free, live readings) are optional — the work order is drafted without them.
+ */
+const OPTIONAL_TOOLS = new Set([
+  'plan_production',
+  'check_plan',
+  'apply_plan',
+  'available_people',
+  'telemetry_latest',
+]);
+
+/**
  * The next model step for the demo, from the question, this answer's history (contents after the
  * user's message) and the system prompt (page context). Null when the demo is off.
  */
 export const demoStep = ({ text, history = [], system }) => {
   if (!demoChat.enabled) return null;
   const s = stateOf(String(text ?? ''), callsOf(history), system);
-  const failed = s.lastStep.find(
-    (c) => c.response?.error && !['plan_production', 'check_plan', 'apply_plan'].includes(c.name),
-  );
+  const failed = s.lastStep.find((c) => c.response?.error && !OPTIONAL_TOOLS.has(c.name));
   if (failed) {
     const r = failed.response;
     if (REFUSED.test(r.error)) return { text: errorText(r) };
     return {
-      text: `I couldn't finish that: ${r.error}${r.hint ? ` (${r.hint})` : ''}${r.issues?.length ? ` — ${r.issues.map((i) => `${i.path}: ${i.message}`).join('; ')}` : ''}.`,
+      text: say(s.lang, {
+        en: `I couldn't finish that: ${r.error}${r.hint ? ` (${r.hint})` : ''}${r.issues?.length ? ` — ${r.issues.map((i) => `${i.path}: ${i.message}`).join('; ')}` : ''}.`,
+        hinglish: `Yeh poora nahi ho paya: ${r.error}${r.hint ? ` (${r.hint})` : ''}.`,
+        hi: `यह पूरा नहीं हो पाया: ${r.error}${r.hint ? ` (${r.hint})` : ''}।`,
+      }),
     };
   }
   const next = (FLOWS.find(([test]) => test(s))?.[1] ?? (() => ({ text: HELP })))(s);

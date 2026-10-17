@@ -1,5 +1,5 @@
 import request from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { getModule } from '../src/modules/registry.js';
 import { proposeMaintenancePlan } from '../src/planning/maintenancePlan.js';
@@ -13,6 +13,7 @@ const ist = (local) => new Date(`${local}:00+05:30`);
 const Model = (name) => getModule(name).Model;
 
 describe('checking an edited maintenance plan', () => {
+  afterEach(() => vi.useRealTimers());
   let ctx;
   let acme;
   let press1;
@@ -458,6 +459,8 @@ describe('checking an edited maintenance plan', () => {
       const res = await request(app).post('/api/auth/login').send({ email, password: PASSWORD });
       tokens[who] = res.body.token;
     }
+    // The route reads the clock itself while the fixture is pinned to NOW: run the requests on that clock.
+    vi.useFakeTimers({ toFake: ['Date'], now: NOW });
     const auth = (who) => ({ authorization: `Bearer ${tokens[who]}` });
     const body = {
       ...edit({}),

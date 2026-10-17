@@ -14,7 +14,8 @@ import { aiErrorCode, friendlyAiError, getLlm, isAbort, tierInfo } from './llm.j
 import { createPendingAction, expirePendingActions, stepResponses } from './pendingActions.js';
 import { route } from './router.js';
 import { buildSystemPrompt } from './systemPrompt.js';
-import { getTool, groupsFor, toolsFor } from './tools/registry.js';
+import { fillPlaceholders } from './tools/common.js';
+import { getTool, groupsFor, toolsFor, unknownToolError } from './tools/registry.js';
 import { redact } from './validators/redact.js';
 
 /**
@@ -23,6 +24,11 @@ import { redact } from './validators/redact.js';
  */
 
 const TITLE_SCHEMA = toJsonSchema(z.object({ title: z.string().max(60) }));
+/** Rows kept on a stored tool_result part, so render_* can use a sourceRef from an earlier turn. */
+const STORED_ROWS = 1000;
+/** What the model reads once its tool rounds are spent: answer, do not stall. */
+export const TOOL_BUDGET_MESSAGE =
+  'The tool budget of this answer is used up. Answer the user now from the results you already have: give the facts and numbers you found, say in one short sentence what you could not check, and do not ask whether to try again.';
 const STUCK = /\bI could not determine\b/i;
 const FALLBACK_TIER = { deep: 'balanced', balanced: 'fast', fast: 'balanced' };
 
@@ -60,10 +66,34 @@ const toolError = (err, name) => {
   return { error: `${name} failed: ${String(err?.message ?? err).slice(0, 200)}` };
 };
 
+const sortKeys = (v) =>
+  Array.isArray(v)
+    ? v.map(sortKeys)
+    : v && typeof v === 'object'
+      ? Object.fromEntries(
+          Object.keys(v)
+            .sort()
+            .map((k) => [k, sortKeys(v[k])]),
+        )
+      : v;
+/** Cache key of a tool call: same name and arguments (in any key order) within one turn. */
+export const callKey = (name, args) => `${name} ${JSON.stringify(sortKeys(args ?? {}))}`;
+
+/** Rows and columns of a result worth keeping on the stored part, or null. */
+export const storedRows = (value) => {
+  const data = value?.data;
+  const rows = data?.rows ?? (Array.isArray(data) ? data : null);
+  if (!Array.isArray(rows) || !rows.length) return null;
+  return { rows: rows.slice(0, STORED_ROWS), ...(data?.columns ? { columns: data.columns } : {}) };
+};
+
 /** zod check + run (or preview) with a timeout; never throws except on abort. */
 export const execute = async ({ tool, args, ctx, io, mode = 'run' }) => {
   const started = Date.now();
-  const parsed = tool.schema.safeParse(args ?? {});
+  // "$start" / "$stop" (the KPI syntax) mean the latest resolved range of this turn, else today.
+  // KPI definitions keep them: the runner fills them from the card's timeRange on every run.
+  const filled = tool.group === 'kpi' ? (args ?? {}) : fillPlaceholders(args ?? {}, { ctx, io });
+  const parsed = tool.schema.safeParse(filled);
   if (!parsed.success) {
     return { ms: 0, args, error: { error: 'Invalid arguments', issues: zodIssues(parsed.error) } };
   }
@@ -270,11 +300,13 @@ export const runTurn = async ({
       rowCount: outcome.value?.rowCount ?? null,
       ms: outcome.ms,
       ...(outcome.error ? { error: outcome.error.error } : {}),
+      ...(outcome.cached ? { cached: true } : {}),
     };
-    parts.push({ type: 'tool_result', ...event });
+    const data = outcome.cached ? null : storedRows(outcome.value);
+    parts.push({ type: 'tool_result', ...event, ...(data ? { data } : {}) });
     send('tool_result', event);
-    if (!outcome.error) emitBlocks(outcome.value.blocks);
-    audit(ctx, ids, name, outcome);
+    if (!outcome.error && !outcome.cached) emitBlocks(outcome.value.blocks);
+    if (!outcome.cached) audit(ctx, ids, name, outcome);
     return outcome.error ? { ref, ...outcome.error } : { ref, result: outcome.value.forModel };
   };
 
@@ -289,7 +321,15 @@ export const runTurn = async ({
 
   const usage = { prompt: 0, thoughts: 0, candidates: 0, total: 0 };
   const results = new Map(); // ref → full ToolResult of this turn (render_* / export_csv sourceRef)
-  const io = (callId) => ({ emit: send, signal: turnSignal, results, callId });
+  const cache = new Map(); // callKey → { outcome, hits }: an identical read twice in a turn runs once
+  const io = (callId) => ({
+    emit: send,
+    signal: turnSignal,
+    results,
+    callId,
+    conversationId: conversation._id,
+    context: context ?? message.context ?? null,
+  });
   let status = 'complete';
   let errorInfo = null;
 
@@ -345,9 +385,7 @@ export const runTurn = async ({
           tier,
           purpose: 'chat',
           companyId: ctx.companyId,
-          system: final
-            ? `${system}\n\nThe tool budget of this answer is used up: answer now with what you have.`
-            : system,
+          system: final ? `${system}\n\n${TOOL_BUDGET_MESSAGE}` : system,
           contents,
           tools: tools.length ? [{ functionDeclarations: tools.map(toDeclaration) }] : undefined,
           signal: turnSignal,
@@ -439,6 +477,7 @@ export const runTurn = async ({
 
       const responses = [];
       let pending = null;
+      let fresh = false; // a tool actually ran this round (cached repeats and load_tools are free)
       for (const [index, part] of calls.entries()) {
         const call = part.functionCall;
         const ref = call.id ?? `t_${shortId()}`;
@@ -457,7 +496,7 @@ export const runTurn = async ({
                 error: `${call.name} is not available to ${ctx.user?.name ?? 'this user'} (role ${ctx.role})`,
                 hint: 'Explain this to the user and offer to draft the details instead',
               }
-            : { error: `Unknown tool "${call.name}"`, hint: 'Use one of the declared tools' };
+            : unknownToolError(call.name);
           responses.push(responsePart(call, toolResult(ref, call.name, { ms: 0, args: call.args, error })));
           continue;
         }
@@ -478,7 +517,18 @@ export const runTurn = async ({
           pending = { call, ref, index, tool, args: outcome.args, preview: outcome.value };
           continue;
         }
-        const outcome = await execute({ tool, args: call.args, ctx, io: io(ref) });
+        const key = callKey(tool.name, call.args);
+        const hit = cache.get(key);
+        let outcome;
+        if (hit) {
+          hit.hits += 1;
+          outcome = { ...hit.outcome, ms: 0, cached: true };
+          if (hit.hits > 1) fresh = true; // the model is looping on one call: that costs a round
+        } else {
+          outcome = await execute({ tool, args: call.args, ctx, io: io(ref) });
+          if (!outcome.error && tool.name !== 'load_tools') cache.set(key, { outcome, hits: 0 });
+          if (tool.name !== 'load_tools') fresh = true;
+        }
         if (outcome.value) results.set(ref, outcome.value);
         if (tool.name === 'load_tools' && outcome.value) {
           const [ok, refused] = [
@@ -526,7 +576,7 @@ export const runTurn = async ({
         break;
       }
       gemini.push({ role: 'user', parts: responses });
-      if (calls.some((p) => p.functionCall.name !== 'load_tools')) iterations++;
+      if (fresh) iterations++;
     }
 
     if (turnSignal.aborted) {

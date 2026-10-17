@@ -1,7 +1,12 @@
 import request from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { PASSWORD, setupDatabase, teardownDatabase } from './helpers/db.js';
+
+// Before env.js loads: demo mode off whatever the local .env says (auth-demo.test.js covers it on).
+vi.hoisted(() => {
+  process.env.DEMO_MODE = 'false';
+});
 
 let app;
 beforeAll(async () => {
@@ -40,10 +45,13 @@ describe('auth', () => {
     expect((await request(app).get('/api/m/assets')).status).toBe(401);
   });
 
-  it('never lists accounts or passwords', async () => {
-    const res = await request(app).get('/api/auth/demo-accounts');
-    expect([401, 404]).toContain(res.status);
-    expect(res.body.accounts).toBeUndefined();
+  it('hides the demo routes while DEMO_MODE is off', async () => {
+    const list = await request(app).get('/api/auth/demo-accounts');
+    expect(list.status).toBe(404);
+    expect(list.body).toEqual({ error: { code: 'NOT_FOUND', message: 'Not found' } });
+    const login = await request(app).post('/api/auth/demo-login').send({ email: 'owner_1@acme.test' });
+    expect(login.status).toBe(404);
+    expect(login.body.token).toBeUndefined();
   });
 
   it('serves module metadata and lists with filters', async () => {

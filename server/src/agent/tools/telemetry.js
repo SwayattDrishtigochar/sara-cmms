@@ -5,7 +5,6 @@ import { influxEnabled, queryRows } from '../../config/influx.js';
 import { ParameterSpec } from '../../db/models/ParameterSpec.js';
 import { badRequest } from '../../lib/errors.js';
 import { shiftAt } from '../../lib/shifts.js';
-import { records } from '../../modules/records.js';
 import { ENERGY_FIELDS, KEY_FIELDS, SHOT_FIELDS } from '../../telemetry/catalog.js';
 import {
   discoverFields,
@@ -15,7 +14,18 @@ import {
   statusTimeline,
 } from '../../telemetry/queries.js';
 import { validateRawFlux } from '../validators/flux.js';
-import { compact, fmtDate, money, plantOf, round, rowsResult, timeWindow, zoneOf } from './common.js';
+import {
+  assetRef,
+  assetRefs,
+  compact,
+  fmtDate,
+  money,
+  plantOf,
+  round,
+  rowsResult,
+  timeWindow,
+  zoneOf,
+} from './common.js';
 
 /** Telemetry tools (phase 4 §2): thin wrappers over telemetry/queries.js; series become stats + a chart. */
 
@@ -27,8 +37,24 @@ const AGGREGATE_OF = new Map(
 const UNIT_OF = new Map([...ENERGY_FIELDS, ...SHOT_FIELDS].map((f) => [f.field, f.unit]));
 const MAX_CHART_POINTS = 300;
 
-const assetFor = (ctx, id) => records.get(ctx, 'assets', String(id), { populate: false });
-const assetsFor = (ctx, ids) => Promise.all([...new Set(ids.map(String))].map((id) => assetFor(ctx, id)));
+const assetFor = (ctx, ref) => assetRef(ctx, ref);
+/** Assets of assetIds (ids, codes, names, "all") or the single assetId alias; max per tool. */
+const assetsFor = (ctx, { assetIds, assetId }, max) => assetRefs(ctx, assetIds ?? assetId, { max });
+const ASSET_REF = 'an id, a code (IMM-01) or a name (IMM 1)';
+const RANGE_HELP =
+  'start/stop: ISO, a date, or a phrase ("today", "last 3 days"); stop defaults to now, start to the day before';
+const windowSchema = {
+  start: z.string().max(60).optional().describe(RANGE_HELP),
+  stop: z.string().max(60).optional(),
+};
+const assetsSchema = (max) => ({
+  assetIds: z
+    .array(z.string().min(1))
+    .max(max)
+    .optional()
+    .describe(`Up to ${max} assets, each ${ASSET_REF}; ["all"] or omitted = every asset (capped)`),
+  assetId: z.string().min(1).optional().describe('One asset instead of assetIds'),
+});
 const iso = (ms) => new Date(ms).toISOString();
 /** Chart label of a field key: oilTempPv → "Oil temp PV". */
 export const fieldLabel = (field) =>
@@ -123,7 +149,7 @@ const telemetryFields = {
   group: 'telemetry',
   description:
     'Measurements and fields an asset reports (name, unit, normal band, key fields), including energy and shot-count fields. Call it before telemetry_series to pick the right field name. Example: { assetId }.',
-  schema: z.object({ assetId: z.string().min(1) }),
+  schema: z.object({ assetId: z.string().min(1).describe(ASSET_REF) }),
   run: async (ctx, { assetId }) => {
     const asset = await assetFor(ctx, assetId);
     const fields = await knownFields(asset);
@@ -151,9 +177,9 @@ const telemetryLatest = {
   group: 'telemetry',
   description:
     'Latest value of every field of up to 20 assets (status, time of reading, values). Example: { assetIds: ["…"] }.',
-  schema: z.object({ assetIds: z.array(z.string().min(1)).min(1).max(20) }),
-  run: async (ctx, { assetIds }) => {
-    const assets = await assetsFor(ctx, assetIds);
+  schema: z.object(assetsSchema(20)),
+  run: async (ctx, args) => {
+    const assets = await assetsFor(ctx, args, 20);
     const latest = await latestValues(
       ctx.companyId,
       assets.map((a) => String(a._id)),
@@ -192,10 +218,9 @@ const telemetrySeries = {
   description:
     'Time series of up to 6 fields for up to 5 assets between start and stop, downsampled. The model gets statistics (min/max/mean/first/last/trend); the full series is charted for the user automatically. Example: { assetIds: ["…"], fields: ["oilTempPv"], start, stop }.',
   schema: z.object({
-    assetIds: z.array(z.string().min(1)).min(1).max(5),
+    ...assetsSchema(5),
     fields: z.array(z.string().min(1).max(64)).min(1).max(6),
-    start: z.string(),
-    stop: z.string(),
+    ...windowSchema,
     every: z.enum(WINDOWS).optional().describe('Window size; default fits ~300 points'),
     fn: z
       .enum(AGGREGATES)
@@ -203,9 +228,9 @@ const telemetrySeries = {
       .describe('Aggregate per window; default per field (sum for energy/shots, mean otherwise)'),
     title: z.string().max(120).optional(),
   }),
-  run: async (ctx, { assetIds, fields, start, stop, every, fn, title }) => {
-    const assets = await assetsFor(ctx, assetIds);
-    const window = timeWindow({ start, stop }, { defaultDays: 1 });
+  run: async (ctx, { fields, start, stop, every, fn, title, ...refs }, io) => {
+    const assets = await assetsFor(ctx, refs, 5);
+    const window = timeWindow({ start, stop }, { defaultDays: 1, ctx, io });
     const ids = assets.map((a) => String(a._id));
     const step = every ?? pickWindow(window.start.getTime(), window.stop.getTime(), MAX_CHART_POINTS);
     const byFn = Map.groupBy(fields, (field) => fn ?? AGGREGATE_OF.get(field) ?? 'mean');
@@ -265,6 +290,7 @@ const telemetrySeries = {
       forModel: {
         start: window.start.toISOString(),
         stop: window.stop.toISOString(),
+        ...(window.label ? { timeRange: window.label } : {}),
         every: step,
         series: summary,
         note: data.length
@@ -290,10 +316,10 @@ const telemetryStatusTimeline = {
   group: 'telemetry',
   description:
     'Status runs (Running, Idle, Stopped, OFF, ON, Maintenance) of one asset between start and stop with durations, totals and availability. Use it for "why was X stopped" questions together with downtimes and work orders. Example: { assetId, start, stop }.',
-  schema: z.object({ assetId: z.string().min(1), start: z.string(), stop: z.string() }),
-  run: async (ctx, { assetId, start, stop }) => {
+  schema: z.object({ assetId: z.string().min(1).describe(ASSET_REF), ...windowSchema }),
+  run: async (ctx, { assetId, start, stop }, io) => {
     const asset = await assetFor(ctx, assetId);
-    const window = timeWindow({ start, stop }, { defaultDays: 1 });
+    const window = timeWindow({ start, stop }, { defaultDays: 1, ctx, io });
     const timeline = await statusTimeline(ctx.companyId, String(asset._id), {
       start: window.start,
       stop: window.stop,
@@ -336,14 +362,13 @@ const telemetryShotCounts = {
   description:
     'Shots produced by one machine between start and stop, bucketed by hour, day or shift. Example: { assetId, start, stop, groupBy: "shift" }.',
   schema: z.object({
-    assetId: z.string().min(1),
-    start: z.string(),
-    stop: z.string(),
+    assetId: z.string().min(1).describe(ASSET_REF),
+    ...windowSchema,
     groupBy: z.enum(['hour', 'day', 'shift']).default('hour'),
   }),
-  run: async (ctx, { assetId, start, stop, groupBy }) => {
+  run: async (ctx, { assetId, start, stop, groupBy }, io) => {
     const asset = await assetFor(ctx, assetId);
-    const window = timeWindow({ start, stop }, { defaultDays: 1 });
+    const window = timeWindow({ start, stop }, { defaultDays: 1, ctx, io });
     const { series } = await seriesFor(ctx.companyId, [String(asset._id)], ['shotsProduced'], {
       start: window.start,
       stop: window.stop,
@@ -388,14 +413,13 @@ const energyConsumption = {
   description:
     'Energy (kWh, sum of ENERGY CONSUMPTION) and cost at the plant tariff between start and stop for up to 20 assets, grouped by asset, day, hour or shift. Example: { assetIds: ["…"], start, stop, groupBy: "day" }.',
   schema: z.object({
-    assetIds: z.array(z.string().min(1)).min(1).max(20),
-    start: z.string(),
-    stop: z.string(),
+    ...assetsSchema(20),
+    ...windowSchema,
     groupBy: z.enum(['asset', 'day', 'hour', 'shift']).default('asset'),
   }),
-  run: async (ctx, { assetIds, start, stop, groupBy }) => {
-    const assets = await assetsFor(ctx, assetIds);
-    const window = timeWindow({ start, stop }, { defaultDays: 1 });
+  run: async (ctx, { start, stop, groupBy, ...refs }, io) => {
+    const assets = await assetsFor(ctx, refs, 20);
+    const window = timeWindow({ start, stop }, { defaultDays: 1, ctx, io });
     const { series } = await seriesFor(
       ctx.companyId,
       assets.map((a) => String(a._id)),
@@ -456,6 +480,7 @@ const energyConsumption = {
       forModel: {
         start: window.start.toISOString(),
         stop: window.stop.toISOString(),
+        ...(window.label ? { timeRange: window.label } : {}),
         groupBy,
         assets: assets.map((a) => a.name),
         totalKwh,

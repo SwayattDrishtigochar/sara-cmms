@@ -2,9 +2,11 @@ import { Activity, CalendarClock, Eye, EyeOff, MessageSquareText, Sparkles } fro
 import { useState } from 'react';
 import { Navigate, useLocation, useNavigate } from 'react-router';
 import { getToken } from '../api/client.js';
+import { cn } from '../lib/format.js';
 import { Button } from '../ui/core.jsx';
 import { Field, Input } from '../ui/form.jsx';
-import { useLogin } from './useAuth.js';
+import { DemoAccounts } from './DemoAccounts.jsx';
+import { useDemoAccounts, useDemoLogin, useLogin } from './useAuth.js';
 
 const FEATURES = [
   {
@@ -28,23 +30,22 @@ export const LoginPage = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const login = useLogin();
+  const demoLogin = useDemoLogin();
+  const demoAccounts = useDemoAccounts().data ?? [];
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [show, setShow] = useState(false);
 
-  if (getToken() && !login.isPending && !login.isError) return <Navigate to="/" replace />;
+  const busy = login.isPending || demoLogin.isPending;
+  if (getToken() && !busy && !login.isError && !demoLogin.isError) return <Navigate to="/" replace />;
 
+  const onSignedIn = (data) =>
+    navigate(data.context.role === 'superAdmin' ? '/superadmin' : (location.state?.from ?? '/'), {
+      replace: true,
+    });
   const submit = (e) => {
     e.preventDefault();
-    login.mutate(
-      { email, password },
-      {
-        onSuccess: (data) =>
-          navigate(data.context.role === 'superAdmin' ? '/superadmin' : (location.state?.from ?? '/'), {
-            replace: true,
-          }),
-      },
-    );
+    login.mutate({ email, password }, { onSuccess: onSignedIn });
   };
 
   return (
@@ -92,7 +93,7 @@ export const LoginPage = () => {
       </aside>
 
       <main className="flex items-center justify-center px-4 py-12 sm:px-8">
-        <div className="w-full max-w-sm">
+        <div className={cn('w-full', demoAccounts.length ? 'max-w-xl' : 'max-w-sm')}>
           <div className="mb-8 flex items-center gap-2.5 lg:hidden">
             <img src="/favicon.svg" alt="" className="size-8" />
             <span className="text-lg font-semibold">SARA</span>
@@ -100,7 +101,7 @@ export const LoginPage = () => {
           <h2 className="text-2xl font-semibold tracking-tight text-fg">Sign in</h2>
           <p className="mt-1 text-sm text-muted">Use your SARA account to continue.</p>
 
-          <form onSubmit={submit} className="mt-8 space-y-4" noValidate>
+          <form onSubmit={submit} className="mt-8 max-w-sm space-y-4" noValidate>
             <Field label="Email">
               {(a11y) => (
                 <Input
@@ -146,10 +147,20 @@ export const LoginPage = () => {
                 {login.error.message}
               </p>
             )}
-            <Button type="submit" variant="primary" size="lg" className="w-full" loading={login.isPending}>
+            <Button
+              type="submit"
+              variant="primary"
+              size="lg"
+              className="w-full"
+              loading={login.isPending}
+              disabled={demoLogin.isPending}
+            >
               Sign in
             </Button>
           </form>
+          {demoAccounts.length > 0 && (
+            <DemoAccounts accounts={demoAccounts} signIn={demoLogin} onSignedIn={onSignedIn} />
+          )}
         </div>
       </main>
     </div>

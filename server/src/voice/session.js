@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import mongoose from 'mongoose';
 import { friendlyAiError, isAbort } from '../agent/llm.js';
-import { audit, execute, publicAction } from '../agent/loop.js';
+import { audit, callKey, execute, publicAction, storedRows, TOOL_BUDGET_MESSAGE } from '../agent/loop.js';
 import {
   claimPendingAction,
   createPendingAction,
@@ -10,6 +10,7 @@ import {
   stepResponses,
 } from '../agent/pendingActions.js';
 import { columnsOf } from '../agent/tools/common.js';
+import { getTool, unknownToolError } from '../agent/tools/registry.js';
 import { recordUsage } from '../ai/budget.js';
 import { getAiSettings } from '../ai/settings.js';
 import { stillSignedIn } from '../auth/middleware.js';
@@ -236,6 +237,7 @@ export const createVoiceSession = ({ socket, auth, start, settings, onClose }) =
       outstanding: 0,
       latencyMs: null,
       results: new Map(),
+      cache: new Map(),
       controller: new AbortController(),
     };
     current = turn;
@@ -397,6 +399,8 @@ export const createVoiceSession = ({ socket, auth, start, settings, onClose }) =
     signal: turn.controller.signal,
     results: turn.results,
     callId: ref,
+    conversationId: turn.conversationId,
+    context,
   });
 
   /** Stores and sends blocks on a turn (counted, so the safety net knows something is on the screen). */
@@ -411,11 +415,13 @@ export const createVoiceSession = ({ socket, auth, start, settings, onClose }) =
   };
 
   const toolResult = (turn, ref, name, outcome) => {
-    const event = resultEvent(ref, name, outcome);
-    turn.parts.push({ type: 'tool_result', ...event });
+    const event = { ...resultEvent(ref, name, outcome), ...(outcome.cached ? { cached: true } : {}) };
+    const data = outcome.cached ? null : storedRows(outcome.value);
+    turn.parts.push({ type: 'tool_result', ...event, ...(data ? { data } : {}) });
     send('tool_result', { turnId: turn.id, data: event });
-    if (!outcome.error) emitBlocks(turn, outcome.value.blocks);
-    audit(ctx, { conversationId: turn.conversationId, messageId: turn.messageId }, name, outcome);
+    if (!outcome.error && !outcome.cached) emitBlocks(turn, outcome.value.blocks);
+    if (!outcome.cached)
+      audit(ctx, { conversationId: turn.conversationId, messageId: turn.messageId }, name, outcome);
     return outcome.error ? { ref, ...outcome.error } : { ref, result: outcome.value.forModel };
   };
 
@@ -517,8 +523,8 @@ export const createVoiceSession = ({ socket, auth, start, settings, onClose }) =
    */
   // ponytail: mirrors agent/loop.js call dispatch; extract a shared dispatcher if a third caller appears.
   const dispatch = async (turn, calls) => {
-    turn.rounds += 1;
-    const overBudget = turn.rounds > env.MAX_TOOL_ITERATIONS;
+    const overBudget = turn.rounds >= env.MAX_TOOL_ITERATIONS;
+    let fresh = false; // a tool actually ran this round (cached repeats are free)
     const blockedByPending = turn.pending;
     const answers = new Array(calls.length).fill(null);
     const stored = [];
@@ -542,10 +548,12 @@ export const createVoiceSession = ({ socket, auth, start, settings, onClose }) =
       toolCalls += 1;
       const entry = { call, response: null, i };
       stored.push(entry);
-      const { tool, error } = resolveVoiceTool(ctx, call.name);
+      const resolved = resolveVoiceTool(ctx, call.name);
+      const tool = resolved.tool;
+      const error = resolved.error && !getTool(call.name) ? unknownToolError(call.name) : resolved.error;
       let outcome;
       if (error) outcome = { ms: 0, args: call.args, error };
-      else if (overBudget) outcome = { ms: 0, args: call.args, error: VOICE_ERRORS.budget };
+      else if (overBudget) outcome = { ms: 0, args: call.args, error: { error: TOOL_BUDGET_MESSAGE } };
       else if (tool.requiresConfirmation && write)
         outcome = { ms: 0, args: call.args, error: VOICE_ERRORS.oneChange };
       else if (tool.requiresConfirmation) {
@@ -555,12 +563,23 @@ export const createVoiceSession = ({ socket, auth, start, settings, onClose }) =
           continue;
         }
       } else {
-        outcome = await execute({ tool, args: call.args, ctx, io: io(turn, call.id) });
+        const key = callKey(tool.name, call.args);
+        const hit = turn.cache.get(key);
+        if (hit) {
+          hit.hits += 1;
+          outcome = { ...hit.outcome, ms: 0, cached: true };
+          if (hit.hits > 1) fresh = true;
+        } else {
+          outcome = await execute({ tool, args: call.args, ctx, io: io(turn, call.id) });
+          if (!outcome.error) turn.cache.set(key, { outcome, hits: 0 });
+          fresh = true;
+        }
         if (outcome.value) turn.results.set(call.id, outcome.value);
       }
       entry.response = toolResult(turn, call.id, call.name, outcome);
       answers[i] = entry.response;
     }
+    if (fresh) turn.rounds += 1;
 
     const keep = stored.filter((e) => !cancelled.has(e.call.id));
     if (write && !keep.includes(write.entry)) write = null; // cancelled: no pending action

@@ -1,14 +1,21 @@
 import { DateTime } from 'luxon';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { toDeclaration, toJsonSchema } from '../src/agent/declarations.js';
 import { assistantContents, relaxSignatures } from '../src/agent/history.js';
 import { friendlyAiError, setLlm } from '../src/agent/llm.js';
 import { heuristicRoute, route, tierFor } from '../src/agent/router.js';
+import { buildSystemPrompt, DECISIVE_POLICY, MAX_PROMPT_CHARS } from '../src/agent/systemPrompt.js';
 import { allGroups, allTools, groupsFor, toolsFor } from '../src/agent/tools/registry.js';
-import { resolveTimeRange } from '../src/agent/tools/resolve.js';
+import { lenientTimeRange, resolveTimeRange } from '../src/agent/tools/resolve.js';
 import { fieldLabel } from '../src/agent/tools/telemetry.js';
 import { shownFields } from '../src/agent/tools/write.js';
+import { buildVoicePrompt, VOICE_STYLE } from '../src/voice/prompt.js';
+
+// The prompt tests need no database: the telemetry digest reads an empty spec list.
+vi.mock('../src/db/models/ParameterSpec.js', () => ({
+  ParameterSpec: { find: () => ({ sort: () => ({ lean: () => Promise.resolve([]) }) }) },
+}));
 
 const ctx = {
   companyId: 'c1',
@@ -239,14 +246,51 @@ describe('resolve_time_range', () => {
     ['shift C yesterday', '2026-10-14T16:30:00.000Z', '2026-10-15T00:30:00.000Z'],
     ['yesterday between 2 and 4 pm', '2026-10-14T08:30:00.000Z', '2026-10-14T10:30:00.000Z'],
     ['12-10-2026', '2026-10-11T18:30:00.000Z', '2026-10-12T18:30:00.000Z'],
+    // phrases the live model sent that used to be refused
+    ['this past year', '2025-10-15T06:30:00.000Z', '2026-10-15T06:30:00.000Z'],
+    ['past 7 days', '2026-10-08T06:30:00.000Z', '2026-10-15T06:30:00.000Z'],
+    ['next 2 days', '2026-10-15T06:30:00.000Z', '2026-10-17T06:30:00.000Z'],
+    ['next week', '2026-10-18T18:30:00.000Z', '2026-10-25T18:30:00.000Z'],
+    ['last 3 hours', '2026-10-15T03:30:00.000Z', '2026-10-15T06:30:00.000Z'],
+    ['since Monday', '2026-10-11T18:30:00.000Z', '2026-10-15T06:30:00.000Z'],
+    ['last monday', '2026-10-11T18:30:00.000Z', '2026-10-12T18:30:00.000Z'],
+    ['2 days ago', '2026-10-12T18:30:00.000Z', '2026-10-13T18:30:00.000Z'],
+    ['over the last 2 weeks', '2026-10-01T06:30:00.000Z', '2026-10-15T06:30:00.000Z'],
+    ['aaj', '2026-10-14T18:30:00.000Z', '2026-10-15T18:30:00.000Z'],
+    ['pichle hafte', '2026-10-04T18:30:00.000Z', '2026-10-11T18:30:00.000Z'],
+    ['आज', '2026-10-14T18:30:00.000Z', '2026-10-15T18:30:00.000Z'],
+    ['पिछले हफ्ते', '2026-10-04T18:30:00.000Z', '2026-10-11T18:30:00.000Z'],
+    ['पिछले २ घंटे', '2026-10-15T04:30:00.000Z', '2026-10-15T06:30:00.000Z'],
+    ['बीते कल', '2026-10-13T18:30:00.000Z', '2026-10-14T18:30:00.000Z'],
   ])('%s', (text, start, stop) => {
     expect(r(text)).toMatchObject({ start, stop, timeZone: 'Asia/Kolkata' });
   });
 
-  it('labels ranges and rejects nonsense', () => {
+  it('labels ranges; the strict parser refuses nonsense, the agent one assumes today and says so', () => {
     expect(r('last month').label).toBe('Last month (01-09-2026 – 30-09-2026)');
     expect(r('current shift').shift ?? r('current shift').label).toMatch(/A/);
     expect(() => r('whenever it suits')).toThrow(/could not understand/);
+    expect(() => resolveTimeRange({}, tctx, now)).toThrow(/Give a time range/);
+    const guess = lenientTimeRange({ text: 'whenever it suits' }, tctx, now);
+    expect(guess).toMatchObject({ start: '2026-10-14T18:30:00.000Z', assumed: true });
+    expect(guess.label).toMatch(/Today .* could not read "whenever it suits"/);
+    expect(lenientTimeRange({}, tctx, now)).toMatchObject({
+      start: '2026-10-14T18:30:00.000Z',
+      assumed: true,
+    });
+    expect(lenientTimeRange({ text: 'last week' }, tctx, now).assumed).toBeUndefined();
+    expect(() => lenientTimeRange({ start: '2026-10-05', stop: '2026-10-01' }, tctx, now)).toThrow(
+      /before the stop/,
+    );
+    // phrases inside start/stop work too, and a date-only stop covers that whole day
+    expect(resolveTimeRange({ start: 'yesterday', stop: 'today' }, tctx, now)).toMatchObject({
+      start: '2026-10-13T18:30:00.000Z',
+      stop: '2026-10-15T18:30:00.000Z',
+    });
+    expect(resolveTimeRange({ start: '17-10-2026', stop: '17-10-2026' }, tctx, now)).toMatchObject({
+      start: '2026-10-16T18:30:00.000Z',
+      stop: '2026-10-17T18:30:00.000Z',
+    });
   });
 });
 
@@ -282,5 +326,52 @@ describe('user-facing words', () => {
       priority: 'High',
       workStatus: 'Open',
     });
+  });
+});
+
+describe('decisive policy', () => {
+  const pctx = { ...ctx, plants: [], user: { name: 'Vikram Mehta' }, permissions: {} };
+
+  it('is compact and says the essentials', () => {
+    expect(DECISIVE_POLICY.length).toBeLessThan(2600);
+    for (const must of [
+      'Never refuse',
+      'decide them yourself',
+      'available_people',
+      'people "auto"',
+      'retry once',
+      'never look yourself up',
+      'taskAndChecklist',
+      'did you mean',
+      'Hinglish stays Hinglish',
+    ])
+      expect(DECISIVE_POLICY).toContain(must);
+  });
+
+  it('reaches the chat prompt and the voice prompt within the size budget', async () => {
+    const chat = await buildSystemPrompt({ ctx: pctx, groups: ['write'] });
+    expect(chat).toContain(DECISIVE_POLICY);
+    expect(chat.length).toBeLessThanOrEqual(MAX_PROMPT_CHARS);
+    expect(chat).toContain('assign_work_order { workOrder: "WO-163", people: "auto" }');
+    expect(chat).toContain('open_page { page: "record", module: "workorders", recordId: "WO-163" }');
+    const voice = await buildVoicePrompt({ ctx: pctx, conversation: null, language: 'auto' });
+    expect(voice).toContain(DECISIVE_POLICY);
+    expect(voice).toContain(VOICE_STYLE);
+    expect(voice.length).toBeLessThanOrEqual(MAX_PROMPT_CHARS + 4000);
+    expect(VOICE_STYLE).toContain('never switch on your own');
+    expect(VOICE_STYLE).toContain('Decide missing details yourself');
+  });
+
+  it('routes Hinglish and Hindi write verbs to write, and code lookups to maintenance', () => {
+    expect(heuristicRoute('Furnace 2 ke liye breakdown work order banao')).toMatchObject({
+      intent: 'write',
+      suggestedTier: 'deep',
+    });
+    expect(heuristicRoute('Furnace 2 ke liye breakdown work order banao').groups).toContain('write');
+    const hindi = heuristicRoute('Furnace 2 के लिए वर्क ऑर्डर बनाओ');
+    expect(hindi.intent).toBe('write');
+    expect(hindi.groups).toEqual(expect.arrayContaining(['write', 'maintenance']));
+    expect(heuristicRoute('Assign whoever is free to WO-163').intent).toBe('write');
+    expect(heuristicRoute('Open WO-163')).toMatchObject({ intent: 'lookup', groups: ['maintenance'] });
   });
 });

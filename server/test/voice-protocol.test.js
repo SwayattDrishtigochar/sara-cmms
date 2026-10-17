@@ -129,3 +129,15 @@ describe('buildVoicePrompt', () => {
     expect(prompt).toBe(`BASE PROMPT\n\n${VOICE_STYLE}\n${NAVIGATION_NOTE}`);
   });
 });
+
+describe('voice style', () => {
+  it("keeps the user's language and decides instead of asking", () => {
+    expect(VOICE_STYLE).toContain(
+      "Reply in the language of the user's latest utterance (English, Hindi, Marathi, Hinglish …) and never switch on your own",
+    );
+    expect(VOICE_STYLE).toContain('Decide missing details yourself (the decisive policy above)');
+    expect(VOICE_STYLE).toContain('never say something went wrong unless a tool answered with "error"');
+    expect(VOICE_STYLE).not.toMatch(/If the request is ambiguous, ask one short question;/);
+    expect(VOICE_STYLE.length + NAVIGATION_NOTE.length).toBeLessThan(4000);
+  });
+});

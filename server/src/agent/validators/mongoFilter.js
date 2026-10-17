@@ -1,4 +1,6 @@
+import { DateTime } from 'luxon';
 import mongoose from 'mongoose';
+import { env } from '../../config/env.js';
 import { badRequest } from '../../lib/errors.js';
 import { isPrimitiveArray, OBJECT_ID_PATTERN } from '../../modules/fields.js';
 
@@ -39,6 +41,8 @@ const MAX_REGEX = 200;
 const NESTED_QUANTIFIER =
   /\((?:[^()\\]|\\.)*(?:[+*]|\{\d*,?\d*\})(?:[^()\\]|\\.)*\)\??(?:[+*]|\{\d*,?\d*\})|[+*}][+*]/;
 const ISO_LIKE = /^\d{4}-\d{2}-\d{2}/;
+const DMY = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/;
+const NUMBER_WRAPPERS = ['$numberInt', '$numberLong', '$numberDouble', '$numberDecimal'];
 const SYSTEM_DATES = new Set(['createdAt', 'updatedAt', 'deletedAt']);
 
 export const isPlainObject = (v) =>
@@ -75,17 +79,58 @@ export const fieldSpec = (mod, path) => {
   return spec;
 };
 
+/** Unwraps MongoDB extended JSON the model sometimes writes: { $date }, { $oid }, { $numberLong }. */
+export const unwrapExtended = (value) => {
+  if (!isPlainObject(value) || Object.keys(value).length !== 1) return value;
+  const [key, inner] = Object.entries(value)[0];
+  // Only a primitive may sit inside a wrapper: { $oid: { $function } } must not slip past the operator checks.
+  const raw = key === '$date' ? unwrapExtended(inner) : inner;
+  if (typeof raw !== 'string' && typeof raw !== 'number') return value;
+  if (key === '$oid') return raw;
+  if (key === '$date') {
+    const date = typeof raw === 'number' ? new Date(raw) : new Date(String(raw));
+    return Number.isNaN(date.getTime()) ? value : date;
+  }
+  if (NUMBER_WRAPPERS.includes(key)) {
+    const n = Number(raw);
+    return Number.isNaN(n) ? value : n;
+  }
+  return value;
+};
+const isExtended = (value) =>
+  isPlainObject(value) &&
+  Object.keys(value).length === 1 &&
+  ['$oid', '$date', ...NUMBER_WRAPPERS].includes(Object.keys(value)[0]);
+
+/** A date from an ISO string, a date in dd-mm-yyyy / yyyy-mm-dd form (company zone) or an epoch; else null. */
+const dateOf = (value, zone) => {
+  if (value instanceof Date) return value;
+  if (typeof value === 'number') return new Date(value);
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  const dmy = DMY.exec(text);
+  if (dmy) {
+    const dt = DateTime.fromObject({ year: +dmy[3], month: +dmy[2], day: +dmy[1] }, { zone });
+    return dt.isValid ? dt.toJSDate() : null;
+  }
+  if (!ISO_LIKE.test(text)) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    const dt = DateTime.fromISO(text, { zone });
+    return dt.isValid ? dt.toJSDate() : null;
+  }
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
 /** Casts a primitive from the model to what the field stores (ids, dates, numbers, booleans). */
-export const castValue = (spec, value) => {
-  if (value == null || !spec || typeof value === 'object') return value;
+export const castValue = (spec, value, zone = env.DEFAULT_TIMEZONE) => {
+  value = unwrapExtended(value);
+  if (value == null || !spec || (typeof value === 'object' && !(value instanceof Date))) return value;
   const type = spec.type === 'array' && isPrimitiveArray(spec) ? spec.of.type : spec.type;
   if ((type === 'ref' || type === 'refs') && spec.idType !== 'string') {
     return typeof value === 'string' && OBJECT_ID_PATTERN.test(value) ? new ObjectId(value) : value;
   }
-  if (type === 'date' && typeof value === 'string' && ISO_LIKE.test(value)) {
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? value : date;
-  }
+  if (type === 'date') return dateOf(value, zone) ?? value;
   if (type === 'number' && typeof value === 'string' && value.trim() !== '' && !Number.isNaN(Number(value))) {
     return Number(value);
   }
@@ -93,11 +138,12 @@ export const castValue = (spec, value) => {
   return value;
 };
 
-const primitive = (value, spec, path) => {
-  if (value !== null && typeof value === 'object') {
+const primitive = (value, spec, path, ctx) => {
+  const plain = unwrapExtended(value);
+  if (plain !== null && typeof plain === 'object' && !(plain instanceof Date)) {
     throw badRequest(`"${path}" expects a plain value here, not an object`);
   }
-  return castValue(spec, value);
+  return castValue(spec, plain, ctx?.company?.timeZone ?? env.DEFAULT_TIMEZONE);
 };
 
 /** Bounds a regex the model wrote: length, no nested quantifiers, imsx options only, compiles. */
@@ -142,7 +188,7 @@ const sanitizeOperators = (obj, spec, s) => {
       case '$nin':
       case '$all': {
         if (!Array.isArray(value)) throw badRequest(`${op} on "${s.path}" needs an array`);
-        out[op] = value.map((v) => primitive(v, elementOf(spec), s.path));
+        out[op] = value.map((v) => primitive(v, elementOf(spec), s.path, s.ctx));
         break;
       }
       case '$exists':
@@ -179,7 +225,7 @@ const sanitizeOperators = (obj, spec, s) => {
         break;
       }
       default:
-        out[op] = primitive(value, spec, s.path);
+        out[op] = primitive(value, spec, s.path, s.ctx);
     }
   }
   if ('$regex' in out) {
@@ -190,12 +236,13 @@ const sanitizeOperators = (obj, spec, s) => {
 };
 
 const sanitizeValue = (value, spec, s) => {
-  if (Array.isArray(value)) return value.map((v) => primitive(v, elementOf(spec), s.path));
+  if (Array.isArray(value)) return value.map((v) => primitive(v, elementOf(spec), s.path, s.ctx));
+  if (isExtended(value)) return primitive(value, spec, s.path, s.ctx);
   if (isPlainObject(value)) {
     if (Object.keys(value).some((k) => k.startsWith('$'))) return sanitizeOperators(value, spec, s);
     return sanitizeObject(value, s); // nested document equality, e.g. { trackProcess: { openedAt } }
   }
-  return primitive(value, spec, s.path);
+  return primitive(value, spec, s.path, s.ctx);
 };
 
 const sanitizeObject = (filter, s) => {

@@ -7,7 +7,7 @@ const here = fileURLToPath(new URL('.', import.meta.url));
 const ROOTS = [join(here, '../src'), join(here, '../../client/src')];
 const EXT = /\.(js|jsx|css|md)$/;
 const FORBIDDEN =
-  /simul|isSimulated|simcontrol|simevents|siminstances|simactivity|simstate|demo-accounts|DEMO_MODE|accountGenerator|blueprint|\bfake\b|mock data/i;
+  /simul|isSimulated|simcontrol|simevents|siminstances|simactivity|simstate|accountGenerator|blueprint|\bfake\b|mock data/i;
 
 const walk = (dir) =>
   readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -15,7 +15,7 @@ const walk = (dir) =>
     return entry.isDirectory() ? walk(path) : EXT.test(entry.name) ? [path] : [];
   });
 
-/** SARA reads like a real platform: no source file mentions a simulation, demo accounts or fake data. */
+/** SARA reads like a real platform: no source file mentions a simulation or fake data (demo mode is a real feature). */
 describe('de-sim', () => {
   it('leaves no trace of a simulator in server/src or client/src', () => {
     const hits = [];

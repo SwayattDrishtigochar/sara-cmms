@@ -196,7 +196,9 @@ describe('mockLive session', () => {
       expect(callsOf(msgs)).toEqual([
         { id: expect.any(String), name: 'confirm_action', args: { actionId: 'act9' } },
       ]);
-      expect(transcript(msgs)).toBe('Done: Created 1 work order.');
+      // The answer follows the language of the "yes" itself.
+      const done = /[ऀ-ॿ]/.test(word) ? 'हो गया' : 'Done';
+      expect(transcript(msgs)).toBe(`${done}: Created 1 work order.`);
     },
   );
 
@@ -509,7 +511,7 @@ describe('voice flows', () => {
     expect(callsOf(yes)).toEqual([
       { id: expect.any(String), name: 'confirm_action', args: { actionId: 'act7' } },
     ]);
-    expect(transcript(yes)).toBe('Done: Applied PP-4: 1 plan and 2 job cards created.');
+    expect(transcript(yes)).toBe('Ho gaya: Applied PP-4: 1 plan and 2 job cards created.');
   });
 });
 
@@ -556,5 +558,80 @@ describe('toneFor and spoken', () => {
     expect(long).toMatch(/plant\.$/);
     expect(spoken('word'.repeat(150)).length).toBeLessThanOrEqual(400);
     expect(spoken('work_orders_summary')).toBe('work_orders_summary.');
+  });
+});
+
+describe('decisive voice flows (the chat demo flows by voice)', () => {
+  const answer = (c) => ({
+    ref: c.id,
+    ...{
+      resolve: { result: { matches: [{ id: 'f2', label: 'FUR-02 · Furnace 2' }] } },
+      available_people: { result: { rows: [{ id: 'u7', name: 'Ramesh Kumar' }] } },
+      telemetry_latest: { result: { rows: [{ asset: 'Furnace 2', status: 'Stopped', currentTemp: 619 }] } },
+      create_record: { status: 'awaiting_confirmation', actionId: 'act3', label: 'Create 1 work order' },
+      assign_work_order: { status: 'awaiting_confirmation', actionId: 'act4', label: 'Assign WO-163' },
+      confirm_action: { status: 'confirmed', summary: 'Created 1 work order' },
+      open_page: { result: { url: '/m/workorders/x', label: 'WO-163 · Low injection pressure' } },
+    }[c.name],
+  });
+
+  it('a Hinglish breakdown ask drafts the work order, says the decision in Hinglish and asks in Hinglish', async () => {
+    demoChat.enabled = true;
+    const h = await open({ answer });
+    const msgs = await h.say('Furnace 2 ke liye breakdown work order banao');
+    expect(callsOf(msgs).map((c) => c.name)).toEqual([
+      'resolve',
+      'available_people',
+      'telemetry_latest',
+      'create_record',
+    ]);
+    const said = transcript(msgs);
+    expect(said).toMatch(
+      /^Maine tay kiya: priority High \(breakdown\), category Breakdown, aaj tak, 120 min, Ramesh Kumar ko assign \(abhi free\)\./,
+    );
+    expect(said).not.toMatch(/confirm|Yeh raha|Decided|Here is/i);
+    expect(said).toMatch(/Create 1 work order\. Aage badhun\?$/);
+    const yes = await h.say('haan, kar do');
+    expect(callsOf(yes)).toEqual([
+      { id: expect.any(String), name: 'confirm_action', args: { actionId: 'act3' } },
+    ]);
+    expect(transcript(yes)).toBe('Ho gaya: Created 1 work order.');
+  });
+
+  it('a Hindi (Devanagari) breakdown ask is not read as a machine question and is answered in Hindi', async () => {
+    demoChat.enabled = true;
+    const h = await open({ answer });
+    const msgs = await h.say('Furnace 2 के लिए breakdown work order बनाओ');
+    expect(callsOf(msgs).map((c) => c.name)).toEqual([
+      'resolve',
+      'available_people',
+      'telemetry_latest',
+      'create_record',
+    ]);
+    expect(transcript(msgs)).toMatch(
+      /^मैंने तय किया: priority High \(breakdown\).*Create 1 work order\. आगे बढ़ूँ\?$/,
+    );
+  });
+
+  it('"assign whoever is free" and "open WO-163" run without a question', async () => {
+    demoChat.enabled = true;
+    const h = await open({ answer });
+    const assign = await h.say('Assign whoever is free to WO-163');
+    expect(callsOf(assign)).toEqual([
+      { id: expect.any(String), name: 'assign_work_order', args: { workOrder: 'WO-163', people: 'auto' } },
+    ]);
+    expect(transcript(assign)).toBe(
+      'Decided: whoever is free now takes WO-163. Assign WO-163. Shall I go ahead?',
+    );
+    const other = await open({ answer });
+    const msgs = await other.say('Open WO-163');
+    expect(callsOf(msgs)).toEqual([
+      {
+        id: expect.any(String),
+        name: 'open_page',
+        args: { page: 'record', module: 'workorders', recordId: 'WO-163' },
+      },
+    ]);
+    expect(transcript(msgs)).toBe('Opened WO-163, Low injection pressure on your screen.');
   });
 });

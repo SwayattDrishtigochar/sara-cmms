@@ -34,8 +34,8 @@ const costSummaryTool = {
     plantId: z.string().optional(),
     assetIds: z.array(z.string().min(1)).max(20).optional(),
   }),
-  run: async (ctx, { start, stop, groupBy, components, plantId, assetIds }) => {
-    const window = timeWindow({ start, stop });
+  run: async (ctx, { start, stop, groupBy, components, plantId, assetIds }, io) => {
+    const window = timeWindow({ start, stop }, { ctx, io });
     const summary = await costSummary(ctx, { ...window, groupBy, components, plantId, assetIds });
     const totals = Object.fromEntries(
       Object.entries(summary.totals).map(([k, v]) => [

@@ -4,7 +4,7 @@ import { badRequest } from '../../lib/errors.js';
 import { shiftAt, shiftWindows } from '../../lib/shifts.js';
 import { records } from '../../modules/records.js';
 import { getModule, labelOf } from '../../modules/registry.js';
-import { DATE_TOKENS, plantName, plantOf, readableModule, zoneOf } from './common.js';
+import { DATE_TOKENS, fuzzyScore, plantName, plantOf, readableModule, refKey, zoneOf } from './common.js';
 
 /** Name → record and text → time range resolution (phase 4 §2 `resolve`, `resolve_time_range`). */
 
@@ -73,7 +73,27 @@ const match = (ctx, mod, doc) => {
   return out;
 };
 
-/** Finds up to 5 records by name/code; several equally strong hits set `needsDisambiguation`. */
+/** Records whose name/code is close to the query (typos, "IMM-01" for "IMM 1"), scored 0–1. */
+const fuzzyMatches = async (ctx, module, mod, query, filter) => {
+  const { items } = await records.list(ctx, module, { limit: 300, populate: false, filter });
+  const key = refKey(query);
+  return items
+    .map((doc) => {
+      const labels = [doc[mod.codeField], ...mod.search.map((f) => doc[f]), labelOf(mod, doc)].filter(
+        (v) => typeof v === 'string' && v,
+      );
+      const exactKey = labels.some((l) => refKey(l) === key);
+      const score = exactKey ? 1 : Math.max(0, ...labels.map((l) => fuzzyScore(query, l)));
+      return { doc, score, exactKey };
+    })
+    .filter((m) => m.score >= 0.5)
+    .sort((a, b) => b.score - a.score || labelOf(mod, a.doc).localeCompare(labelOf(mod, b.doc)));
+};
+
+/**
+ * Finds up to 5 records by name/code; several equally strong hits set `needsDisambiguation`. When nothing
+ * matches exactly, the closest names come back with `fuzzy: true` and a "did you mean" hint.
+ */
 export const resolveRecords = async (ctx, { kind, query, plantId }) => {
   const module = KINDS[kind];
   const mod = readableModule(ctx, module);
@@ -82,18 +102,29 @@ export const resolveRecords = async (ctx, { kind, query, plantId }) => {
   let { items } = await search(query);
   const words = String(query).trim().split(/\s+/);
   if (!items.length && words.length > 1) ({ items } = await search(words[0]));
-  const scored = items
+  let scored = items
     .map((doc) => ({ doc, score: scoreOf(mod, doc, query) }))
     .filter((m) => m.score > 0)
     .sort((a, b) => b.score - a.score || labelOf(mod, a.doc).localeCompare(labelOf(mod, b.doc)));
+  let fuzzy = false;
+  if (!scored.length) {
+    scored = await fuzzyMatches(ctx, module, mod, query, filter);
+    fuzzy = scored.length > 0 && !scored[0].exactKey;
+  }
   const matches = scored.slice(0, MAX_MATCHES).map((m) => match(ctx, mod, m.doc));
   const needsDisambiguation = scored.length > 1 && scored[0].score === scored[1].score;
+  const hint = !matches.length
+    ? `No ${mod.label.toLowerCase()} match "${query}"; try a shorter name or ask the user`
+    : fuzzy
+      ? `No exact match for "${query}"; the closest is ${matches[0].label}. Use it if it is what the user meant, and say so.`
+      : null;
   return {
     kind,
     module,
     matches,
     needsDisambiguation,
-    ...(matches.length ? {} : { hint: `No ${mod.label.toLowerCase()} match "${query}"; try a shorter name` }),
+    ...(fuzzy ? { fuzzy: true } : {}),
+    ...(hint ? { hint } : {}),
   };
 };
 
@@ -171,6 +202,35 @@ const MONTHS = {
   december: 12,
 };
 const DAY_WORDS = /\b(today|yesterday|tomorrow)\b/;
+const WEEKDAYS = { monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6, sunday: 7 };
+/** Hinglish / Hindi phrases the voice model passes through, mapped to the English the parser knows. */
+const ALIASES = [
+  // Devanagari (no \b: JS word boundaries are ASCII-only)
+  [/आज/g, 'today'],
+  [/(बीते\s*)?कल/g, 'yesterday'],
+  [/परसों/g, '2 days ago'],
+  [/(इस|इसी)\s*(हफ्ते|हफ़्ते|सप्ताह)/g, 'this week'],
+  [/(पिछले|बीते|गए)\s*(हफ्ते|हफ़्ते|सप्ताह)/g, 'last week'],
+  [/(इस|इसी)\s*(महीने|माह)/g, 'this month'],
+  [/(पिछले|बीते)\s*(महीने|माह)/g, 'last month'],
+  [/(पिछले|बीते)\s*(साल|वर्ष)/g, 'last year'],
+  [/(पिछले|बीते)\s*(\d+)\s*(दिन|दिनों)/g, 'last $2 days'],
+  [/(पिछले|बीते)\s*(\d+)\s*(घंटे|घंटों)/g, 'last $2 hours'],
+  [/अगले\s*(\d+)\s*(दिन|दिनों)/g, 'next $1 days'],
+  [/अभी/g, 'now'],
+  [/\baaj\b/g, 'today'],
+  [/\b(kal|beete kal)\b/g, 'yesterday'],
+  [/\bparso\b/g, '2 days ago'],
+  [/\b(is|iss)\s+(hafte|saptah|week)\b/g, 'this week'],
+  [/\b(pichhle|pichle|pichale)\s+(hafte|saptah|week)\b/g, 'last week'],
+  [/\b(is|iss)\s+(mahine|maheene|month)\b/g, 'this month'],
+  [/\b(pichhle|pichle|pichale)\s+(mahine|maheene|month)\b/g, 'last month'],
+  [/\b(pichhle|pichle|pichale)\s+(\d+)\s+(din|dino|dinon)\b/g, 'last $2 days'],
+  [/\b(pichhle|pichle|pichale)\s+(\d+)\s+(ghante|ghanton)\b/g, 'last $2 hours'],
+  [/\b(agle|agla)\s+(\d+)\s+(din|dino|dinon)\b/g, 'next $2 days'],
+  [/\b(abhi|right now)\b/g, 'now'],
+  [/^\s*(the\s+)?(whole|entire|full|all)\s+(time|period|history|data)\s*$/g, 'this past year'],
+];
 const RANGE_SPLIT = /^(?:between|from)?\s*(.+?)\s+(?:and|to|until|till|-|–)\s+(.+)$/;
 
 const num = (word) => (word in WORD_NUM ? WORD_NUM[word] : Number(word));
@@ -289,7 +349,19 @@ const parseText = (raw, now, ctx, plant) => {
   const zone = now.zone;
   const f = fmt(ctx);
   const opts = { zone, year: now.year, dateFormat: ctx.company?.dateFormat };
-  let t = raw.toLowerCase().replace(/,/g, ' ').replace(/\s+/g, ' ').trim();
+  let t = raw
+    .toLowerCase()
+    .replace(/[०-९]/g, (d) => '०१२३४५६७८९'.indexOf(d))
+    .replace(/,/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  for (const [re, to] of ALIASES) t = t.replace(re, to);
+  t = t
+    .replace(/^(?:over|in|during|for|within|of)\s+(?:the\s+)?/, '')
+    .replace(/^this\s+(past|last|previous|coming|upcoming)\b/, '$1')
+    .replace(/^(?:the\s+)?(coming|upcoming|following)\b/, 'next')
+    .replace(/\s+(?:so far|till now|until now|up to now|to date)$/, '')
+    .trim();
   let m;
   let shiftLetter = null;
   m = /\b(?:shift\s*([abc])|([abc])[\s-]*shift)\b/.exec(t);
@@ -342,14 +414,49 @@ const parseText = (raw, now, ctx, plant) => {
     }
   }
 
-  m = /^(this|last|previous|past|next)\s+(week|month|quarter|year)$/.exec(t);
+  m = /^(this|last|previous|next)\s+(week|month|quarter|year)$/.exec(t);
   if (m) {
-    const offset = { this: 0, last: -1, previous: -1, past: -1, next: 1 }[m[1]];
+    const offset = { this: 0, last: -1, previous: -1, next: 1 }[m[1]];
     const range = unitRange(now, UNITS[m[2]], offset);
-    const label = `${m[1] === 'previous' || m[1] === 'past' ? 'Last' : m[1][0].toUpperCase() + m[1].slice(1)} ${m[2]} (${f.span(range.start, range.stop)})`;
+    const label = `${m[1] === 'previous' ? 'Last' : m[1][0].toUpperCase() + m[1].slice(1)} ${m[2]} (${f.span(range.start, range.stop)})`;
     return withShift({ ...range, label });
   }
-  m = /^(?:last|past|previous)\s+(\d+|[a-z]+)?\s*([a-z]+)$/.exec(t);
+  m = /^next\s+(\d+|[a-z]+)?\s*([a-z]+)$/.exec(t);
+  if (m && UNITS[m[2]]) {
+    const n = m[1] ? num(m[1]) : 1;
+    if (!Number.isFinite(n) || n <= 0 || n > 1000)
+      throw badRequest(`I could not read the number in "${raw}"`);
+    const unit = UNITS[m[2]];
+    const stop = now.plus({ [unit]: n });
+    const label = `Next ${n} ${n === 1 ? unit.replace(/s$/, '') : unit} (${f.span(now, stop)})`;
+    return { start: now, stop, label };
+  }
+  m = /^(\d+|[a-z]+)\s+([a-z]+)\s+ago$/.exec(t);
+  if (m && UNITS[m[2]]) {
+    const n = num(m[1]);
+    if (!Number.isFinite(n) || n <= 0 || n > 1000)
+      throw badRequest(`I could not read the number in "${raw}"`);
+    const unit = UNITS[m[2]];
+    const fine = unit === 'hours' || unit === 'minutes';
+    const at = now.minus({ [unit]: n });
+    const start = fine ? at : at.startOf('day');
+    const stop = fine ? at.plus({ hours: 1 }) : start.plus({ days: 1 });
+    return withShift({ start, stop, label: `${n} ${unit} ago (${f.span(start, stop)})` });
+  }
+  m = /^(?:since|from|after)\s+(?:last\s+)?([a-z]+)$/.exec(t);
+  if (m && WEEKDAYS[m[1]]) {
+    const start = now.startOf('day').minus({ days: (now.weekday - WEEKDAYS[m[1]] + 7) % 7 });
+    const label = `Since ${m[1][0].toUpperCase()}${m[1].slice(1)} (${f.span(start, now)})`;
+    return withShift({ start, stop: now, label });
+  }
+  m = /^(?:last\s+|this\s+|on\s+)?([a-z]+)$/.exec(t);
+  if (m && WEEKDAYS[m[1]]) {
+    const back = (now.weekday - WEEKDAYS[m[1]] + 7) % 7 || (t.startsWith('last') ? 7 : 0);
+    const start = now.startOf('day').minus({ days: back });
+    const label = `${m[1][0].toUpperCase()}${m[1].slice(1)} (${f.day(start)})`;
+    return withShift({ start, stop: start.plus({ days: 1 }), label });
+  }
+  m = /^(?:last|past|previous)\s+(?:(\d+|[a-z]+)\s+)?([a-z]+)$/.exec(t);
   if (m && UNITS[m[2]]) {
     const n = m[1] ? num(m[1]) : 1;
     if (!Number.isFinite(n) || n <= 0 || n > 1000)
@@ -360,7 +467,7 @@ const parseText = (raw, now, ctx, plant) => {
       return { ...range, label: `Last ${n} quarter${n > 1 ? 's' : ''} (${f.span(range.start, range.stop)})` };
     }
     const start = now.minus({ [unit]: n });
-    const label = `Last ${n} ${n === 1 ? unit.replace(/s$/, '') : unit} (${f.span(start, now)})`;
+    const label = `${n === 1 ? `Past ${unit.replace(/s$/, '')}` : `Last ${n} ${unit}`} (${f.span(start, now)})`;
     return withShift({ start, stop: now, label });
   }
   m = /^q([1-4])\s*(\d{4})?$/.exec(t);
@@ -411,7 +518,7 @@ const parseText = (raw, now, ctx, plant) => {
   }
   const single = parseDate(t, opts);
   if (single) return withShift({ start: single, stop: single.plus({ days: 1 }), label: f.day(single) });
-  throw badRequest(`I could not understand the time range "${raw}"; ask the user for dates`);
+  throw badRequest(`I could not understand the time range "${raw}"`);
 };
 
 const parseInput = (value, { zone, now, ctx, end = false }) => {
@@ -422,9 +529,9 @@ const parseInput = (value, { zone, now, ctx, end = false }) => {
   if (day) return end ? day.plus({ days: 1 }) : day;
   const epoch = /^\d{12,}$/.test(text) ? DateTime.fromMillis(Number(text), { zone }) : null;
   if (epoch?.isValid) return epoch;
-  throw badRequest(
-    `"${text}" is not a date I understand (use ISO 8601 or ${ctx.company?.dateFormat ?? 'DD-MM-YYYY'})`,
-  );
+  // A phrase in start/stop ("today", "last monday"): its own start or stop.
+  const range = parseText(text, now, ctx, plantOf(ctx));
+  return end ? range.stop : range.start;
 };
 
 /**
@@ -470,30 +577,47 @@ export const resolveTimeRange = ({ text, start, stop, shift, plantId } = {}, ctx
   };
 };
 
-const timeRangeSchema = z
-  .object({
-    text: z
-      .string()
-      .max(120)
-      .optional()
-      .describe('e.g. "yesterday", "last 2 hours", "Q3 2026", "shift A yesterday"'),
-    start: z.string().max(40).optional().describe('ISO date/time or a date in the company format'),
-    stop: z.string().max(40).optional(),
-    shift: z.string().max(10).optional().describe('Shift name (A, B, C) to narrow the day to'),
-    plantId: z.string().optional().describe('Plant whose shifts apply (default: the user plant)'),
-  })
-  .superRefine((v, ctx) => {
-    if (!v.text?.trim() && !v.start && !v.stop && !v.shift) {
-      ctx.addIssue({ code: 'custom', message: 'Give text, start/stop or a shift' });
-    }
-  });
+const UNREADABLE = /could not understand|Give a time range|could not read the number/;
+
+/**
+ * `resolveTimeRange` for the agent: a phrase it cannot read, or no range at all, becomes today
+ * (`assumed: true`, the label says why) instead of a question back to the user.
+ */
+export const lenientTimeRange = (args = {}, ctx, now = DateTime.now()) => {
+  try {
+    return resolveTimeRange(args, ctx, now);
+  } catch (err) {
+    if (err?.status !== 400 || !UNREADABLE.test(err.message)) throw err;
+    const phrase = args.text ?? args.start ?? args.stop;
+    const today = resolveTimeRange({ text: 'today' }, ctx, now);
+    return {
+      ...today,
+      label: phrase
+        ? `${today.label} — could not read "${phrase}", so assumed today: mention that in passing and carry on with this range`
+        : `${today.label} — no range given, so today`,
+      assumed: true,
+    };
+  }
+};
+
+const timeRangeSchema = z.object({
+  text: z
+    .string()
+    .max(120)
+    .optional()
+    .describe('e.g. "yesterday", "last 2 hours", "Q3 2026", "shift A yesterday"'),
+  start: z.string().max(40).optional().describe('ISO date/time or a date in the company format'),
+  stop: z.string().max(40).optional(),
+  shift: z.string().max(10).optional().describe('Shift name (A, B, C) to narrow the day to'),
+  plantId: z.string().optional().describe('Plant whose shifts apply (default: the user plant)'),
+});
 
 export const resolveTools = [
   {
     name: 'resolve',
     group: 'core',
     description:
-      'Finds records by name or code: asset, user, tool, plant, job_card, spare_part, work_order, production_plan, anomaly, supplier, vendor, customer. Call it before querying by name and use the returned id. Example: { kind: "asset", query: "Compressor 2" }. needsDisambiguation=true means several equally good matches: ask the user which one.',
+      'Finds records by name or code: asset, user, tool, plant, job_card, spare_part, work_order, production_plan, anomaly, supplier, vendor, customer. Call it before querying by name and use the returned id. Typos are tolerated: fuzzy=true means the closest name was used (say so to the user). Example: { kind: "asset", query: "Compressor 2" }. needsDisambiguation=true means several equally good matches: pick the most likely one and name it, or ask when it matters (a write).',
     schema: z.object({
       kind: z.enum(Object.keys(KINDS)),
       query: z.string().min(1).max(120),
@@ -518,10 +642,10 @@ export const resolveTools = [
     name: 'resolve_time_range',
     group: 'core',
     description:
-      'Turns a phrase into a concrete start/stop in the company time zone, shift-aware. Understands today, yesterday, this/last week|month|quarter|year, last N hours|days, Q3 2026, dates in the company format, "yesterday between 2 and 4 pm", "shift A yesterday", "current shift", "last shift". Always call it before a tool that needs start/stop. Example: { text: "last 2 hours" }.',
+      'Turns a phrase into a concrete start/stop in the company time zone, shift-aware. Understands today, yesterday, this/last/next week|month|quarter|year, last/past/next N hours|days|weeks, "this past year", "since Monday", Q3 2026, dates in the company format, "yesterday between 2 and 4 pm", "shift A yesterday", "current shift", "last shift". Tools that take start/stop accept these phrases directly, so call this only when you need the dates themselves. An unreadable phrase falls back to today (assumed: true): say so. Example: { text: "last 2 hours" }.',
     schema: timeRangeSchema,
     run: async (ctx, args) => {
-      const range = resolveTimeRange(args, ctx);
+      const range = lenientTimeRange(args, ctx);
       return { forModel: range, summary: range.label, data: range };
     },
   },

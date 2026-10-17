@@ -44,6 +44,52 @@ export const stripWindow = (args = {}) => {
   return rest;
 };
 
+const GROUP_ALIASES = {
+  daily: 'day',
+  days: 'day',
+  date: 'day',
+  hourly: 'hour',
+  hours: 'hour',
+  machine: 'asset',
+  machines: 'asset',
+  assets: 'asset',
+  shifts: 'shift',
+  reasons: 'reason',
+  parts: 'part',
+  statuses: 'status',
+  priorities: 'priority',
+};
+const enumValues = (schema) =>
+  schema?.def?.entries ? Object.values(schema.def.entries) : (schema?.options ?? null);
+
+/**
+ * Loose source args the model writes → what the tool takes: assetId ↔ assetIds, groupBy words
+ * ("daily" → "day"), a generous limit for list_anomalies (the range filter happens after the run).
+ */
+export const coerceSourceArgs = (tool, args = {}) => {
+  const out = { ...(args ?? {}) };
+  const shape = tool.schema?.shape ?? {};
+  if ('assetIds' in shape && !('assetId' in shape) && out.assetId != null && out.assetIds == null) {
+    out.assetIds = [].concat(out.assetId);
+    delete out.assetId;
+  }
+  if ('assetId' in shape && !('assetIds' in shape) && out.assetIds != null && out.assetId == null) {
+    out.assetId = [].concat(out.assetIds)[0];
+    delete out.assetIds;
+  }
+  if ('groupBy' in shape && typeof out.groupBy === 'string') {
+    const allowed = enumValues(shape.groupBy.unwrap?.() ?? shape.groupBy) ?? [];
+    const word = out.groupBy
+      .toLowerCase()
+      .replace(/^(by|per)\s+/, '')
+      .trim();
+    const hit = allowed.find((v) => v.toLowerCase() === word) ?? GROUP_ALIASES[word];
+    if (hit && allowed.includes(hit)) out.groupBy = hit;
+  }
+  if (tool.name === 'list_anomalies') out.limit ??= 100;
+  return out;
+};
+
 /** `"$start"` / `"$stop"` at any depth → the run's window; top-level start/stop injected when the tool takes them. */
 export const argsFor = (tool, args, range) => {
   const swap = (v) => {
@@ -54,7 +100,7 @@ export const argsFor = (tool, args, range) => {
       return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, swap(x)]));
     return v;
   };
-  const out = swap(stripWindow(args));
+  const out = swap(coerceSourceArgs(tool, stripWindow(args)));
   const shape = tool.schema?.shape ?? {};
   if ('start' in shape) out.start = range.start;
   if ('stop' in shape) out.stop = range.stop;
@@ -103,7 +149,7 @@ export const validateKpi = (ctx, def, { now } = {}) => {
         for (const issue of parsed.error.issues)
           add(`sources.${i}.args.${issue.path.join('.')}`.replace(/\.$/, ''), issue.message);
     }
-    return { ...s, args: stripWindow(s.args) };
+    return { ...s, args: tool ? coerceSourceArgs(tool, stripWindow(s.args)) : stripWindow(s.args) };
   });
   if (def.formula) {
     try {
@@ -152,11 +198,21 @@ const runSource = async (ctx, source, range, signal) => {
       source.tool,
     );
     const picked = readPath({ forModel: out?.forModel, data: out?.data }, source.pick || 'data.rows');
-    const value = picked ?? out?.forModel?.rows ?? out?.forModel?.count ?? null;
+    const value = inRange(picked ?? out?.forModel?.rows ?? out?.forModel?.count ?? null, range);
     return { value, columns: out?.data?.columns };
   } catch (err) {
     return { error: err?.message ?? String(err) };
   }
+};
+
+/** Rows stamped with detectedAt (anomalies) keep only the KPI's window; the tool itself has no range. */
+const inRange = (value, range) => {
+  if (!Array.isArray(value) || !value.length || !('detectedAt' in (value[0] ?? {}))) return value;
+  const [start, stop] = [Date.parse(range.start), Date.parse(range.stop)];
+  return value.filter((r) => {
+    const t = Date.parse(r.detectedAt);
+    return Number.isNaN(t) || (t >= start && t < stop);
+  });
 };
 
 /** Runs a KPI in `ctx` (the viewer's); a failing source never throws, it sets `result.error`. */

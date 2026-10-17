@@ -25,10 +25,10 @@ export const useSession = () => {
   return data?.context ?? null;
 };
 
-export const useLogin = () => {
+const useSignIn = (path) => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body) => api('/auth/login', { method: 'POST', body }),
+    mutationFn: (body) => api(path, { method: 'POST', body }),
     onSuccess: (data) => {
       setToken(data.token);
       setFormatPrefs(data.context.company);
@@ -36,6 +36,21 @@ export const useLogin = () => {
     },
   });
 };
+
+export const useLogin = () => useSignIn('/auth/login');
+
+/** Demo mode: signs in as a listed demo person with { email } only. */
+export const useDemoLogin = () => useSignIn('/auth/demo-login');
+
+/** Demo mode's account list; [] while loading or when demo mode is off (the route answers 404). */
+export const useDemoAccounts = () =>
+  useQuery({
+    queryKey: ['demo-accounts'],
+    queryFn: () => api('/auth/demo-accounts'),
+    retry: false,
+    staleTime: 5 * 60_000,
+    select: (data) => data?.accounts ?? [],
+  });
 
 export const useLogout = () => {
   const qc = useQueryClient();

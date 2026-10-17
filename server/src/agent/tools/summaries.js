@@ -1,14 +1,16 @@
 import { DateTime } from 'luxon';
 import { z } from 'zod';
-import { badRequest } from '../../lib/errors.js';
+import { badRequest, notFound } from '../../lib/errors.js';
 import { shiftAt } from '../../lib/shifts.js';
 import { scopeFilter } from '../../modules/records.js';
 import { getModule } from '../../modules/registry.js';
 import {
   asObjectId,
+  assetRef,
   compact,
   findByIdOrCode,
   fmtDate,
+  fuzzyScore,
   labelsFor,
   money,
   plantOf,
@@ -29,12 +31,18 @@ const plantMatch = (plantId) => {
   if (!id) throw badRequest('plantId must be a 24-character id');
   return { plantId: id };
 };
-const assetMatch = (assetId) => {
-  if (!assetId) return {};
-  const id = asObjectId(assetId);
-  if (!id) throw badRequest('assetId must be a 24-character id');
-  return { assetId: id };
+/** `{ assetId }` for an id, code or name; nothing for "all" or no asset. */
+const assetMatch = async (ctx, assetId) => {
+  if (!assetId || /^(all|\*)$/i.test(String(assetId))) return {};
+  return { assetId: (await assetRef(ctx, assetId))._id };
 };
+const RANGE_HELP =
+  'start/stop: ISO, a date, or a phrase ("today", "last 3 days"); stop defaults to now, start to 30 days before';
+const windowSchema = {
+  start: z.string().max(60).optional().describe(RANGE_HELP),
+  stop: z.string().max(60).optional(),
+};
+const ASSET_HELP = 'An asset id, code (IMM-01) or name (IMM 1); omit for every asset';
 const rangeLabel = (ctx, w) =>
   `${fmtDate(ctx, w.start, { time: true })} – ${fmtDate(ctx, w.stop, { time: true })}`;
 const aggregate = (mod, pipeline) => mod.Model.aggregate(pipeline).option({ maxTimeMS: MAX_TIME_MS }).exec();
@@ -48,18 +56,17 @@ const workOrdersSummary = {
   schema: z.object({
     groupBy: z.enum(['status', 'priority', 'category', 'asset', 'assignee', 'plant']),
     scope: z.enum(['open', 'overdue', 'completed', 'all']).default('open'),
-    start: z.string().optional(),
-    stop: z.string().optional(),
+    ...windowSchema,
     plantId: z.string().optional(),
   }),
-  run: async (ctx, { groupBy, scope, start, stop, plantId }) => {
+  run: async (ctx, { groupBy, scope, start, stop, plantId }, io) => {
     const mod = readableModule(ctx, 'workorders');
     const now = new Date();
     const match = { ...plantMatch(plantId), ...scopeFilter(ctx, mod) };
     if (scope === 'open' || scope === 'overdue') match.workStatus = { $nin: DONE };
     if (scope === 'overdue') match.dueDate = { $lt: now };
     if (scope === 'completed') match.workStatus = { $in: DONE };
-    const window = start || stop ? timeWindow({ start, stop }) : null;
+    const window = start || stop ? timeWindow({ start, stop }, { ctx, io }) : null;
     if (window) match.createdAt = { $gte: window.start, $lt: window.stop };
     const field = {
       status: 'workStatus',
@@ -275,14 +282,52 @@ const upcomingMaintenance = {
   },
 };
 
+const RUNNING = ['In Progress', 'Open', 'On Hold'];
+const statusRank = (jc) => {
+  const i = RUNNING.indexOf(jc.jobStatus);
+  return i === -1 ? RUNNING.length : i;
+};
+
+/** A job card by code or id, else the running card of a part name or of a machine. */
+const jobCardOf = async (ctx, ref) => {
+  const mod = readableModule(ctx, 'jobcards');
+  try {
+    return await findByIdOrCode(ctx, 'jobcards', ref);
+  } catch (err) {
+    if (err.status !== 404) throw err;
+  }
+  const text = String(ref).replace(/^jc[-\s]*/i, '');
+  const cards = await mod.Model.find(scopeFilter(ctx, mod)).sort({ startDate: -1 }).limit(300).lean();
+  const byText = cards
+    .map((jc) => ({
+      jc,
+      score: Math.max(fuzzyScore(text, jc.partName ?? ''), fuzzyScore(text, jc.jobName ?? '')),
+    }))
+    .filter((m) => m.score >= 0.99)
+    .sort((a, b) => b.score - a.score || statusRank(a.jc) - statusRank(b.jc));
+  if (byText.length) return byText[0].jc;
+  const asset = await assetRef(ctx, ref).catch(() => null);
+  if (asset) {
+    const onMachine = cards
+      .filter((jc) => String(jc.asset) === String(asset._id))
+      .sort((a, b) => statusRank(a) - statusRank(b));
+    if (onMachine.length) return onMachine[0];
+    throw notFound(`No job card on ${asset.name}`);
+  }
+  const names = [...new Set(cards.map((jc) => jc.partName).filter(Boolean))];
+  throw notFound(`Job card "${ref}" not found`, {
+    hint: `Pass a code (JC-12), a part name or a machine. Parts with cards: ${names.slice(0, 10).join(', ')}`,
+  });
+};
+
 const jobCardProgress = {
   name: 'job_card_progress',
   group: 'production',
   description:
-    'Progress and quality of one job card (by code like JC-12 or id): parts produced versus target, expected by now, rejection count, OEE when completed. Example: { jobCard: "JC-12" }.',
-  schema: z.object({ jobCard: z.string().min(1).max(60) }),
+    'Progress and quality of one job card: parts produced versus target, expected by now, rejection count, OEE when completed. jobCard is a code (JC-12), an id, a part name ("Bracket C": its running card) or a machine ("IMM 2": the card running on it). Example: { jobCard: "JC-12" }.',
+  schema: z.object({ jobCard: z.string().min(1).max(80) }),
   run: async (ctx, { jobCard }) => {
-    const jc = await findByIdOrCode(ctx, 'jobcards', jobCard);
+    const jc = await jobCardOf(ctx, jobCard);
     const [assetLabels, toolLabels] = await Promise.all([
       labelsFor(ctx, 'assets', [jc.asset]),
       labelsFor(ctx, 'tools', [jc.tool]),
@@ -353,19 +398,18 @@ const rejectionSummary = {
   description:
     'Rejected parts in a time range grouped by reason, part, asset, shift, jobCard or day, with counts and share. Example: { start, stop, groupBy: "reason" }.',
   schema: z.object({
-    start: z.string(),
-    stop: z.string(),
+    ...windowSchema,
     groupBy: z.enum(['reason', 'part', 'asset', 'shift', 'jobCard', 'day']).default('reason'),
     plantId: z.string().optional(),
-    assetId: z.string().optional(),
+    assetId: z.string().optional().describe(ASSET_HELP),
   }),
-  run: async (ctx, { start, stop, groupBy, plantId, assetId }) => {
+  run: async (ctx, { start, stop, groupBy, plantId, assetId }, io) => {
     const mod = readableModule(ctx, 'rejections');
-    const window = timeWindow({ start, stop });
+    const window = timeWindow({ start, stop }, { ctx, io });
     const zone = zoneOf(ctx);
     const match = {
       ...plantMatch(plantId),
-      ...assetMatch(assetId),
+      ...(await assetMatch(ctx, assetId)),
       ...scopeFilter(ctx, mod),
       createdAt: { $gte: window.start, $lt: window.stop },
     };
@@ -427,15 +471,14 @@ const downtimeSummary = {
   description:
     'Machine downtime (Stopped/OFF inside shifts) in a time range grouped by asset, reason or day: hours, number of stops, cost at the asset downtime rate, top reasons per asset. Example: { start, stop, groupBy: "asset" }.',
   schema: z.object({
-    start: z.string(),
-    stop: z.string(),
+    ...windowSchema,
     groupBy: z.enum(['asset', 'reason', 'day']).default('asset'),
     plantId: z.string().optional(),
-    assetId: z.string().optional(),
+    assetId: z.string().optional().describe(ASSET_HELP),
   }),
-  run: async (ctx, { start, stop, groupBy, plantId, assetId }) => {
+  run: async (ctx, { start, stop, groupBy, plantId, assetId }, io) => {
     const mod = readableModule(ctx, 'downtimes');
-    const window = timeWindow({ start, stop });
+    const window = timeWindow({ start, stop }, { ctx, io });
     const zone = zoneOf(ctx);
     const settings = ctx.modules.includes('costsettings')
       ? await getModule('costsettings').Model.findOne({ companyId: ctx.companyId }).lean()
@@ -443,7 +486,7 @@ const downtimeSummary = {
     const defaultRate = settings?.defaultDowntimeCostPerHour ?? 2500;
     const match = {
       ...plantMatch(plantId),
-      ...assetMatch(assetId),
+      ...(await assetMatch(ctx, assetId)),
       ...scopeFilter(ctx, mod),
       startedAt: { $gte: window.start, $lt: window.stop },
     };
@@ -529,11 +572,11 @@ const attendanceSummary = {
   group: 'people',
   description:
     'Who checked in during a time range, with shift, check-in/out, hours worked and break minutes. Example: { start, stop } for today.',
-  schema: z.object({ start: z.string(), stop: z.string(), plantId: z.string().optional() }),
-  run: async (ctx, { start, stop, plantId }) => {
+  schema: z.object({ ...windowSchema, plantId: z.string().optional() }),
+  run: async (ctx, { start, stop, plantId }, io) => {
     const mod = readableModule(ctx, 'checkinouts');
     const breaksMod = readableModule(ctx, 'userbreaktimes');
-    const window = timeWindow({ start, stop });
+    const window = timeWindow({ start, stop }, { ctx, io, defaultDays: 1 });
     const checkins = await mod.Model.find({
       ...plantMatch(plantId),
       ...scopeFilter(ctx, mod),

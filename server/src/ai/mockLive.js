@@ -1,5 +1,5 @@
 import { mockScripts, scriptFor } from './mock.js';
-import { demoStep } from './mockChat.js';
+import { demoStep, langOf } from './mockChat.js';
 
 /**
  * Scripted stand-in for a Gemini Live connection (AI_MOCK=true): the same messages the SDK delivers
@@ -350,7 +350,8 @@ export const VOICE_FLOWS = [
   ],
   [(s) => /\b(need|needs)\b.*\battention\b|\battention\b.*\bneed|ध्यान/.test(s.t), needsAttention],
   [(s) => /\b(show|list)\b.*\bmachines\b/.test(s.t), machinesList],
-  [(s) => s.hindi && Boolean(assetIn(s.text)), machineInHindi],
+  // A Hindi ask about a machine, unless it asks for a change (the chat demo flows draft those).
+  [(s) => s.hindi && Boolean(assetIn(s.text)) && !WRITE_ASK.test(s.text), machineInHindi],
   // Test scripts own this question when they register one (the e2e test does).
   [
     (s) =>
@@ -361,6 +362,10 @@ export const VOICE_FLOWS = [
   ],
 ];
 
+const WRITE_ASK = /बनाओ|बना दो|हटाओ|लगाओ|लगा दो|banao|bana do|assign|create|delete|hatao/i;
+/** The confirmation question and the "done" prefix in the user's language. */
+const ASK = { en: 'Shall I go ahead?', hinglish: 'Aage badhun?', hi: 'आगे बढ़ूँ?' };
+const DONE = { en: 'Done', hinglish: 'Ho gaya', hi: 'हो गया' };
 const FALLBACK = "I'm SARA in mock mode: type or use Say something.";
 const FALLBACK_HI = 'मैं SARA हूँ, अभी mock mode में: टाइप कीजिए या Say something इस्तेमाल कीजिए।';
 const NOTHING_PENDING = "There's nothing waiting for your answer right now. What would you like to do?";
@@ -376,7 +381,7 @@ const DEMO_HELP = /mock mode \(AI_MOCK=true/;
 const beforeCalls = (text) =>
   text
     ? text
-        .replace(/[^.!?\n]*\bConfirm\b[^.!?\n]*[.!?]?/g, '')
+        .replace(/[^.!?\n।]*\bconfirm\b[^.!?\n।]*[.!?।]?/gi, '')
         .replace(/(^|\n|[.!?]\s)\s*Here(?: is|'s| are)\b[^.!?\n]*[.!?]?/g, '$1')
     : '';
 
@@ -399,10 +404,10 @@ const controlFailed = (r) => {
   return r.error ?? 'That change could not be made.';
 };
 
-const doneText = (r) => {
+const doneText = (r, lang = 'en') => {
   const code = r.result?.created?.[0]?.label?.split(' · ')[0];
   const summary = String(r.summary ?? 'the change is saved').replace(/[.!?]+$/, '');
-  return `Done: ${summary}${code && !summary.includes(code) ? `, ${code}` : ''}.`;
+  return `${DONE[lang]}: ${summary}${code && !summary.includes(code) ? `, ${code}` : ''}.`;
 };
 
 const createSession = ({ config = {}, callbacks = {} }) => {
@@ -473,17 +478,18 @@ const createSession = ({ config = {}, callbacks = {} }) => {
   const nextStep = (text, history) => {
     const turn = history.filter((c) => c.role === 'model').length;
     const last = history.at(-1)?.role === 'user' ? history.at(-1).parts.map((p) => p.functionResponse) : [];
+    const lang = langOf(text);
     const awaiting = last.find((r) => r.response?.status === 'awaiting_confirmation');
     if (awaiting) {
       const label = String(awaiting.response.label ?? 'This change').replace(/[.!?]+$/, '');
       action = { actionId: awaiting.response.actionId, label };
-      return { text: `${label}. Shall I go ahead?` };
+      return { text: `${label}. ${ASK[lang]}` };
     }
     const control = last.find((r) => CONTROL.has(r.name));
     if (control) {
       const r = control.response ?? {};
       if (r.status) action = null;
-      if (r.status === 'confirmed') return { text: doneText(r) };
+      if (r.status === 'confirmed') return { text: doneText(r, lang) };
       if (r.status === 'rejected') return { text: "Okay, I won't make that change." };
       return { text: controlFailed(r) };
     }

@@ -151,8 +151,12 @@ describe('open_page URLs', () => {
   it('refuses unknown modules, fields, enum values, sorts, pages and ambiguous names', async () => {
     await expect(page({ page: 'list', module: 'nope' })).rejects.toThrow(/Unknown module/);
     await expect(
-      page({ page: 'list', module: 'workorders', filters: [{ field: 'name', value: 'x' }] }),
+      page({ page: 'list', module: 'workorders', filters: [{ field: 'nonsense', value: 'x' }] }),
     ).rejects.toThrow(/not a filter/);
+    // a text field is not a column filter but a search: it becomes q instead of an error
+    expect(
+      (await page({ page: 'list', module: 'workorders', filters: [{ field: 'name', value: 'leak' }] })).url,
+    ).toBe('/m/workorders?q=leak');
     await expect(
       page({ page: 'list', module: 'workorders', filters: [{ field: 'priority', value: 'Urgent' }] }),
     ).rejects.toThrow(/not a Priority/);
@@ -162,8 +166,8 @@ describe('open_page URLs', () => {
     );
     await expect(page({ page: 'kpis', filters: [{ field: 'a', value: 'b' }] })).rejects.toThrow(/no filters/);
     await expect(page({ page: 'kpis', q: 'x' })).rejects.toThrow(/no search/);
-    await expect(page({ page: 'machine', recordId: 'Nothing like this' })).rejects.toThrow(/No asset/);
-    await expect(page({ page: 'machine', recordId: 'IMM' })).rejects.toThrow(/ask the user which one/);
+    await expect(page({ page: 'machine', recordId: 'Nothing like this' })).rejects.toThrow(/Asset not found/);
+    await expect(page({ page: 'machine', recordId: 'IMM' })).rejects.toThrow(/Several assets match "IMM"/);
     await expect(page({ page: 'record', module: 'workorders' })).rejects.toThrow(/id, code or name/);
     await fails({ page: 'record', recordId: 'x' });
     await fails({ page: 'list' });

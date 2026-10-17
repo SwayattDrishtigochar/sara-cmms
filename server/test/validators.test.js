@@ -101,6 +101,39 @@ describe('sanitizeFilter', () => {
     expect(f({ dueDate: 'tomorrow' }).dueDate).toBe('tomorrow');
   });
 
+  it('accepts extended JSON, dd-mm-yyyy dates and numeric strings the model writes', () => {
+    const out = f({
+      dueDate: { $gte: { $date: '2026-10-01T00:00:00Z' } },
+      createdAt: { $lt: '15-10-2026' },
+      updatedAt: { $date: { $numberLong: '1760000000000' } },
+      asset: { $oid: HEX },
+      people: { $in: [{ $oid: HEX }] },
+      'spareParts.plannedQuantity': { $gt: { $numberInt: '2' } },
+    });
+    expect(out.dueDate.$gte).toEqual(new Date('2026-10-01T00:00:00Z'));
+    expect(out.createdAt.$lt).toBeInstanceOf(Date);
+    expect(Math.abs(out.createdAt.$lt - new Date('2026-10-15T00:00:00Z'))).toBeLessThan(86_400_000);
+    expect(out.updatedAt).toEqual(new Date(1760000000000));
+    expect(out.asset).toBeInstanceOf(ObjectId);
+    expect(out.people.$in[0]).toBeInstanceOf(ObjectId);
+    expect(out['spareParts.plannedQuantity'].$gt).toBe(2);
+    // an unknown field still takes { $date } (the audit had "date" on a module without that spec)
+    expect(f({ date: { $gte: { $date: '2026-10-01T00:00:00Z' } } }).date.$gte).toBeInstanceOf(Date);
+    // other objects in value position are still refused
+    expect(() => f({ dueDate: { $gte: { nested: 1 } } })).toThrow(/plain value/);
+    const stages = p([{ $addFields: { late: { $lt: ['$dueDate', { $date: '2026-10-01T00:00:00Z' }] } } }]);
+    expect(stages.at(-2).$addFields.late.$lt[1]).toEqual(new Date('2026-10-01T00:00:00Z'));
+  });
+
+  it('does not let an extended JSON wrapper hide a banned operator', () => {
+    const fn = { $function: { body: 'function () {}', args: [], lang: 'js' } };
+    expect(() => p([{ $addFields: { x: { $oid: fn } } }])).toThrow(/not allowed/);
+    expect(() => p([{ $group: { _id: null, v: { $date: { $accumulator: {} } } } }])).toThrow(/not allowed/);
+    expect(() => p([{ $project: { v: { $numberLong: fn } } }])).toThrow(/not allowed/);
+    expect(() => f({ asset: { $oid: { $where: 'x' } } })).toThrow(/plain value|not allowed/);
+    expect(() => f({ asset: { $in: [{ $oid: { $where: 'x' } }] } })).toThrow(/plain value|not allowed/);
+  });
+
   it('casts inside $elemMatch', () => {
     const out = f({ spareParts: { $elemMatch: { sparePart: HEX, plannedQuantity: { $gt: '2' } } } });
     expect(out.spareParts.$elemMatch.sparePart).toBeInstanceOf(ObjectId);

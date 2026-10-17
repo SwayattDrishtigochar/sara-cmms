@@ -2,7 +2,7 @@ import { env } from '../../config/env.js';
 import { badRequest } from '../../lib/errors.js';
 import { scopeFilter } from '../../modules/records.js';
 import { getModule, hasModule } from '../../modules/registry.js';
-import { checkKey, checkRegex, isPlainObject, sanitizeFilter } from './mongoFilter.js';
+import { checkKey, checkRegex, isPlainObject, sanitizeFilter, unwrapExtended } from './mongoFilter.js';
 
 /** Aggregation guard (phase 4 §3): stage allow-list, scoped first stage, safe joins, bounded output. */
 export const ALLOWED_STAGES = new Set([
@@ -41,21 +41,26 @@ const MAX_EXPR_DEPTH = 16;
 const LOOKUP_KEYS = ['from', 'localField', 'foreignField', 'as'];
 const REGEX_OPERATORS = new Set(['$regexMatch', '$regexFind', '$regexFindAll']);
 
-/** Rejects banned operators and prototype keys anywhere inside an expression. */
-const assertSafeExpression = (value, depth = 0) => {
+/**
+ * A safe copy of an expression: banned operators and prototype keys rejected anywhere inside, extended
+ * JSON ({ $date }, { $oid }, { $numberLong }) turned into the values Mongo expects.
+ */
+const safeExpression = (value, depth = 0) => {
   if (depth > MAX_EXPR_DEPTH) throw badRequest('The pipeline is nested too deeply');
-  if (Array.isArray(value)) {
-    for (const v of value) assertSafeExpression(v, depth + 1);
-    return;
-  }
-  if (value === null || typeof value !== 'object') return;
+  if (Array.isArray(value)) return value.map((v) => safeExpression(v, depth + 1));
+  if (value === null || typeof value !== 'object') return value;
+  if (value instanceof Date) return value;
   if (!isPlainObject(value)) throw badRequest('Pipeline stages must be plain JSON');
+  const plain = unwrapExtended(value);
+  if (plain !== value) return plain;
+  const out = {};
   for (const [key, v] of Object.entries(value)) {
     checkKey(key);
     if (BANNED_OPERATORS.has(key)) throw badRequest(`"${key}" is not allowed`);
     if (REGEX_OPERATORS.has(key)) checkRegex(v?.regex, v?.options ?? '');
-    assertSafeExpression(v, depth + 1);
+    out[key] = safeExpression(v, depth + 1);
   }
+  return out;
 };
 
 const clampInt = (value, min, max, what) => {
@@ -119,8 +124,7 @@ const sanitizeStages = (stages, s) =>
       case '$skip':
         return { $skip: clampInt(value, 0, 1_000_000, '$skip') };
       default:
-        assertSafeExpression(value);
-        return { [key]: value };
+        return { [key]: safeExpression(value) };
     }
   });
 

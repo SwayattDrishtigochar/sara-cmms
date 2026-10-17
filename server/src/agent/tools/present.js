@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AiMessage } from '../../db/models/AiMessage.js';
 import { badRequest } from '../../lib/errors.js';
 import { columnsOf } from './common.js';
 
@@ -15,14 +16,32 @@ const column = z.object({
 });
 export const CHART_TYPES = ['line', 'bar', 'area', 'stackedBar', 'combo', 'pie', 'scatter'];
 
-/** Rows from a previous tool call of this turn (`sourceRef` = its call id) or inline. */
-const rowsOf = (args, io, key = 'rows') => {
+/** The stored data of a tool call (or block) of an earlier turn of this conversation, or null. */
+const storedData = async (io, ref) => {
+  if (!io?.conversationId) return null;
+  const message = await AiMessage.findOne({ conversationId: io.conversationId, 'parts.id': ref })
+    .select('parts')
+    .lean();
+  // The tool_call part shares the id; the tool_result (or a block) carries the rows.
+  const part = (message?.parts ?? []).find(
+    (p) => p.id === ref && (p.type === 'tool_result' || p.type === 'block'),
+  );
+  if (!part) return null;
+  if (part.type === 'tool_result') return part.data ?? null;
+  if (part.type === 'block' && Array.isArray(part.payload?.rows)) return part.payload;
+  return null;
+};
+
+/** Rows from a previous tool call (`sourceRef` = its call id, this turn or an earlier one) or inline. */
+const rowsOf = async (args, io, key = 'rows') => {
   if (args.sourceRef) {
     const source = io?.results?.get(args.sourceRef);
-    if (!source) {
-      throw badRequest(`sourceRef "${args.sourceRef}" is not a tool call of this turn; pass ${key} inline`);
+    const data = source ? source.data : await storedData(io, args.sourceRef);
+    if (!source && !data) {
+      throw badRequest(
+        `sourceRef "${args.sourceRef}" is not a tool call of this conversation; call the tool again or pass ${key} inline`,
+      );
     }
-    const data = source.data;
     const rows = data?.rows ?? (Array.isArray(data) ? data : null);
     if (!Array.isArray(rows)) throw badRequest(`Tool call "${args.sourceRef}" returned no rows to render`);
     return { rows, columns: data?.columns };
@@ -40,7 +59,7 @@ export const presentTools = [
     name: 'render_table',
     group: 'core',
     description:
-      'Shows a table to the user. Pass sourceRef (the id of an earlier tool call this turn) to render its full rows, or rows inline. Example: { title: "Overdue work orders", sourceRef: "<call id>" }.',
+      'Shows a table to the user. Pass sourceRef (the id of an earlier tool call, this turn or a previous one) to render its full rows, or rows inline. Example: { title: "Overdue work orders", sourceRef: "<call id>" }.',
     schema: z.object({
       title: z.string().max(120),
       columns: z.array(column).max(40).optional(),
@@ -48,7 +67,7 @@ export const presentTools = [
       sourceRef: z.string().max(80).optional(),
     }),
     run: async (_ctx, args, io) => {
-      const { rows, columns } = rowsOf(args, io);
+      const { rows, columns } = await rowsOf(args, io);
       const payload = {
         title: args.title,
         columns: fillColumns(args.columns ?? columns, rows),
@@ -90,7 +109,7 @@ export const presentTools = [
       sourceRef: z.string().max(80).optional(),
     }),
     run: async (_ctx, args, io) => {
-      const { rows } = rowsOf(args, io, 'data');
+      const { rows } = await rowsOf(args, io, 'data');
       const data = rows.slice(0, MAX_CHART_POINTS);
       const keys = new Set(Object.keys(data[0] ?? {}));
       const missing = [args.xKey, ...args.series.map((s) => s.key)].filter((k) => !keys.has(k));
@@ -154,7 +173,7 @@ export const presentTools = [
       sourceRef: z.string().max(80).optional(),
     }),
     run: async (_ctx, args, io) => {
-      const { rows, columns } = rowsOf(args, io);
+      const { rows, columns } = await rowsOf(args, io);
       const name = /\.csv$/i.test(args.name) ? args.name : `${args.name}.csv`;
       const cols = fillColumns(args.columns ?? columns, rows);
       return {
