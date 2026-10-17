@@ -114,7 +114,7 @@ export const listProposals = async (ctx, { status, kind, limit = 20 } = {}) => {
   assertCan(ctx, mod, 'read');
   const where = {
     ...(status ? { status: { $in: String(status).split(',') } } : {}),
-    ...(kind ? { kind: String(kind) } : {}),
+    ...(kind ? { kind: { $in: String(kind).split(',') } } : {}),
     ...scopeFilter(ctx, mod),
   };
   const items = await mod.Model.find(where)
@@ -143,6 +143,10 @@ const replan = async (ctx, p) => {
   if (p.kind === 'maintenance') {
     const { proposeMaintenance } = await import('./maintenance.js');
     return proposeMaintenance(ctx, p.input);
+  }
+  if (p.kind === 'maintenance_plan') {
+    const { proposeMaintenancePlan } = await import('./maintenancePlan.js');
+    return proposeMaintenancePlan(ctx, p.input);
   }
   const { proposeProduction } = await import('./production.js');
   return proposeProduction(ctx, p.input);
@@ -178,11 +182,24 @@ export const checkApply = async (ctx, idOrCode, { option, now = new Date() } = {
   return { proposal: p, ops, option: chosen };
 };
 
-/** Applies a draft (or resumes a failed/interrupted apply); a second confirm returns the stored result. */
-export const applyProposal = async (ctx, idOrCode, { option, now } = {}) => {
+/**
+ * Applies a draft (or resumes a failed/interrupted apply); a second confirm returns the stored result.
+ * A plan whose last check said not_doable needs `force`.
+ */
+export const applyProposal = async (ctx, idOrCode, { option, force = false, now } = {}) => {
   const checked = await checkApply(ctx, idOrCode, { option, now });
   if (checked.applied) return { proposal: checked.proposal, ...checked.proposal.result };
   const { proposal: p, ops, option: chosen } = checked;
+  if (p.feasibility?.verdict === 'not_doable' && !force) {
+    throw new AppError(
+      409,
+      'PLAN_NOT_DOABLE',
+      'The last check found the plan not doable; adjust it or force',
+      {
+        verdict: p.feasibility.verdict,
+      },
+    );
+  }
 
   const claimed = await Proposal()
     .findOneAndUpdate(
@@ -231,13 +248,27 @@ export const applyProposal = async (ctx, idOrCode, { option, now } = {}) => {
   }
 
   const result = { created, updated };
-  const planOp = ops.find((o) => o.module === 'productionplans');
+  // The created plan record carries the engine's read-only fields and the link back to this proposal.
+  const planOp = ops.find(
+    (o) => o.op === 'create' && ['productionplans', 'maintenanceplans'].includes(o.module),
+  );
   const planId = planOp ? ids.get(planOp.seq) : null;
-  if (p.kind === 'production' && planId && p.feasibility) {
-    const { feasible, projectedFinish, slackHours, shortfall, notes } = p.feasibility;
+  const aiSummary = p.explanation ?? null;
+  if (planId && planOp.module === 'productionplans' && p.feasibility) {
+    const issues = (p.issues ?? []).slice(0, 20).map(({ kind, severity, text }) => ({
+      kind,
+      severity,
+      text: String(text ?? '').slice(0, 300),
+    }));
     await getModule('productionplans').Model.updateOne(
       { _id: planId, companyId: ctx.companyId },
-      { $set: { feasibility: { feasible, projectedFinish, slackHours, shortfall, notes } } },
+      { $set: { feasibility: { ...p.feasibility, issues }, aiSummary, proposal: p._id } },
+    );
+  }
+  if (planId && planOp.module === 'maintenanceplans') {
+    await getModule('maintenanceplans').Model.updateOne(
+      { _id: planId, companyId: ctx.companyId },
+      { $set: { metrics: p.metrics ?? null, aiSummary, proposal: p._id } },
     );
   }
   const proposal = await setStatus(ctx, p, {
@@ -246,7 +277,8 @@ export const applyProposal = async (ctx, idOrCode, { option, now } = {}) => {
     appliedBy: ctx.userId,
     result,
     error: null,
-    ...(planId ? { productionPlanId: planId } : {}),
+    ...(planId && planOp.module === 'productionplans' ? { productionPlanId: planId } : {}),
+    ...(planId && planOp.module === 'maintenanceplans' ? { maintenancePlanId: planId } : {}),
   });
   return { proposal, created, updated };
 };
@@ -286,6 +318,11 @@ export const toPlanBlock = (ctx, proposal, calendar) => {
       title: proposal.title,
     },
     feasibility: proposal.feasibility,
+    verdict: proposal.feasibility?.verdict ?? null,
+    jobCards: proposal.diff?.jobCards ?? [],
+    tasks: proposal.diff?.tasks ?? [],
+    metrics: proposal.metrics ?? null,
+    issues: proposal.issues ?? [],
     delays: proposal.diff?.delays ?? [],
     ...(options.length
       ? {

@@ -15,8 +15,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { cn, formatDateTime, formatNumber, formatTime, getFormatPrefs } from '../lib/format.js';
-import { humanize } from '../superadmin/simUtils.js';
+import { cn, formatDateTime, formatNumber, formatTime, getFormatPrefs, humanize } from '../lib/format.js';
 import { SERIES_MAX, SERIES_VARS, seriesColor } from '../ui/charts.jsx';
 import { Button } from '../ui/core.jsx';
 import { valueAxis } from '../viz/vizData.js';

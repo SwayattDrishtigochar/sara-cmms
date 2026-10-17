@@ -1,7 +1,16 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { shiftWindows } from '../src/lib/shifts.js';
+import { getModule } from '../src/modules/registry.js';
 import { subtractIntervals } from '../src/planning/intervals.js';
 import { planProduction, proposeProduction } from '../src/planning/production.js';
 import { contextFor, NOW, setupDatabase, teardownDatabase } from './helpers/db.js';
+
+// Phase 7: the roster comes from a fixture (full shift windows of the seeded Pune people, no breaks).
+const roster = { people: [] };
+vi.mock('../src/planning/people.js', async (importOriginal) => ({
+  ...(await importOriginal()),
+  loadPeople: async () => structuredClone(roster.people),
+}));
 
 const H = 3_600_000;
 const T0 = new Date('2026-10-19T00:00:00Z');
@@ -55,8 +64,16 @@ const plan = (cal, input) =>
 describe('planProduction', () => {
   it('meets the due date with slack and emits plan + job card ops', () => {
     const p = plan(calendar([machine('m1')], [tool('t1', ['m1'])]), { quantity: 1000, dueDate: t(20) });
-    expect(p.feasibility).toMatchObject({ feasible: true, slackHours: 9, shortfall: 0 });
+    expect(p.feasibility).toMatchObject({
+      feasible: true,
+      verdict: 'doable',
+      slackHours: 9,
+      shortfall: 0,
+      issues: [],
+      adjustments: [],
+    });
     expect(p.feasibility.projectedFinish).toEqual(t(11)); // 1 h changeover + 10 h moulding
+    expect(p.jobCards[0]).toMatchObject({ key: 'op-1', finishAt: t(11), shots: 1000, operators: [] });
     expect(p.ops.map((o) => [o.seq, o.op, o.module])).toEqual([
       [0, 'create', 'productionplans'],
       [1, 'create', 'jobcards'],
@@ -87,8 +104,23 @@ describe('planProduction', () => {
       { partName: 'housing-a', quantity: 2000, dueDate: t(22), rejectionPct: 0 },
       { now: T0, extraCalendar: extra },
     );
-    expect(p.feasibility).toMatchObject({ feasible: false, shortfall: 900, slackHours: -11 });
+    expect(p.feasibility).toMatchObject({
+      feasible: false,
+      shortfall: 900,
+      slackHours: -11,
+      verdict: 'adjust',
+    });
     expect(p.feasibility.projectedFinish).toEqual(t(33));
+    expect(p.feasibility.issues).toEqual([{ kind: 'late', severity: 'critical', text: p.feasibility.notes }]);
+    expect(p.feasibility.adjustments.map((a) => [a.kind, a.resolves])).toEqual([
+      ['extend_due', [0]],
+      ['reduce_quantity', [0]],
+    ]);
+    expect(p.feasibility.adjustments[0].patch).toEqual({ dueDate: t(33).toISOString() });
+    expect(p.feasibility.adjustments[1].patch).toMatchObject({
+      quantity: 1100,
+      jobCards: [{ key: 'op-1', target: 1100 }],
+    });
     expect(p.risks).toContainEqual(expect.objectContaining({ kind: 'late', severity: 'critical' }));
     const kinds = Object.fromEntries(p.alternatives.map((a) => [a.kind, a]));
     expect(kinds.extra_shift.projectedFinish).toEqual(t(21));
@@ -204,8 +236,69 @@ describe('proposeProduction (seeded Acme)', () => {
   beforeAll(async () => {
     await setupDatabase();
     owner = await contextFor('owner_1@acme.test');
+    const pune = owner.plants.find((p) => p.name.startsWith('Pune'));
+    const users = await getModule('users')
+      .Model.find({
+        companyId: owner.companyId,
+        department: 'Production',
+        role: 'technician',
+        plantId: pune._id,
+      })
+      .lean();
+    const window = {
+      start: new Date(NOW.getTime() - 86_400_000),
+      end: new Date(NOW.getTime() + 30 * 86_400_000),
+    };
+    roster.people = users.map((u) => ({
+      userId: String(u._id),
+      name: `${u.firstName} ${u.lastName}`,
+      title: u.userTitle,
+      role: u.role,
+      department: u.department,
+      skills: ['moulding'],
+      shiftId: String(u.shiftId),
+      shiftName: pune.shifts.find((s) => String(s._id) === String(u.shiftId))?.shiftName ?? null,
+      plantId: String(pune._id),
+      onShift: shiftWindows(
+        { ...pune, shifts: pune.shifts.filter((s) => String(s._id) === String(u.shiftId)) },
+        window.start,
+        window.end,
+        'Asia/Kolkata',
+      ).map(({ start, end }) => ({ start, end })),
+      bookings: [],
+      loadHours: 0,
+    }));
   });
   afterAll(teardownDatabase);
+
+  it('assigns operators per shift: ops carry assignedTo and operatorPlan, the proposal its issues', async () => {
+    const p = await proposeProduction(
+      owner,
+      { partName: 'Housing-A', quantity: 2000, dueDate: new Date(NOW.getTime() + 10 * 86_400_000) },
+      { now: NOW },
+    );
+    const cards = p.ops.filter((o) => o.module === 'jobcards');
+    const withCrew = cards.filter((o) => o.data.assignedTo.length > 0);
+    expect(withCrew.length).toBeGreaterThan(0);
+    for (const op of withCrew) {
+      expect(op.data.operatorPlan.length).toBeGreaterThan(0);
+      expect(new Set(op.data.operatorPlan.map((r) => r.user))).toEqual(new Set(op.data.assignedTo));
+      for (const row of op.data.operatorPlan) {
+        expect(['A', 'B', 'C']).toContain(row.shiftName);
+        expect(row.start >= op.data.startDate && row.end <= op.data.endDate).toBe(true);
+      }
+    }
+    const operatorIds = new Set(roster.people.map((x) => x.userId));
+    expect(cards.every((o) => o.data.assignedTo.every((id) => operatorIds.has(id)))).toBe(true);
+    const diffCards = p.diff.jobCards;
+    expect(diffCards.map((c) => c.key)).toEqual(cards.map((_, i) => `op-${i + 1}`));
+    expect(diffCards.every((c) => Array.isArray(c.operators) && c.finishAt)).toBe(true);
+    expect(['doable', 'adjust']).toContain(p.feasibility.verdict);
+    // issues/adjustments live beside feasibility on the proposal (its feasibility subdocument is the phase-5 shape)
+    expect(p.issues.every((i) => i.kind === 'operator_missing' && i.severity === 'warning')).toBe(true);
+    expect(p.adjustments).toEqual([]);
+    expect(p.diff.rejectionRate).toBeGreaterThanOrEqual(0);
+  });
 
   it('plans Housing-A on the Pune moulds as a draft proposal', async () => {
     const dueDate = new Date(NOW.getTime() + 10 * 86_400_000);
@@ -214,7 +307,7 @@ describe('proposeProduction (seeded Acme)', () => {
       { partName: 'housing-a', quantity: 5000, dueDate },
       { now: NOW },
     );
-    expect(p).toMatchObject({ kind: 'production', status: 'draft', proposalCode: 'PLN-1' });
+    expect(p).toMatchObject({ kind: 'production', status: 'draft', proposalCode: 'PLN-2' });
     expect(p.title).toMatch(/^5,000 × Housing-A by /);
     const cards = p.ops.filter((o) => o.module === 'jobcards');
     expect(cards.length).toBeGreaterThan(0);

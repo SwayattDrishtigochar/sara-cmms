@@ -18,6 +18,9 @@ const DEFAULTS = {
   dateField: 'createdAt',
   icon: 'Database',
   inheritPlantFrom: [],
+  // Related records shown on the record page: [{ module, field, label, order? }] where `field` is a
+  // ref/refs field of the child module that points back at this module (phase 7 §2).
+  children: [],
 };
 
 /** Fields every module gets: tenant, plant, soft delete, authorship, plan-apply stamps. */
@@ -97,6 +100,23 @@ const build = () => {
 
     for (const action of Object.values(mod.actions ?? {})) action.schema = toZodObject(action.fields ?? {});
   }
+
+  // Children must point back at their parent through a real ref field (a typo here is a startup error).
+  for (const mod of modules.values()) {
+    mod.children = [...(mod.children ?? [])]
+      .map((child, i) => {
+        const target = modules.get(child.module);
+        if (!target) throw new Error(`Module "${mod.name}": child module "${child.module}" does not exist`);
+        const spec = target.fields[child.field];
+        if (!spec || !['ref', 'refs'].includes(spec.type) || spec.ref !== mod.name) {
+          throw new Error(
+            `Module "${mod.name}": "${child.module}.${child.field}" is not a ref to ${mod.name}`,
+          );
+        }
+        return { label: target.label, order: i, ...child };
+      })
+      .sort((a, b) => a.order - b.order);
+  }
 };
 
 build();
@@ -139,6 +159,7 @@ export const moduleMeta = (mod, can) => ({
   plantScoped: mod.plantScoped,
   softDelete: mod.softDelete,
   idType: mod.idType ?? 'objectId',
+  children: mod.children.map(({ module, field, label, order }) => ({ module, field, label, order })),
   fields: toMeta(mod.fields),
   actions: Object.entries(mod.actions ?? {}).map(([key, a]) => ({
     key,

@@ -10,7 +10,6 @@ import { buildUserContext, publicContext } from '../context/buildUserContext.js'
 import { Session } from '../db/models/Session.js';
 import { parseOrThrow, unauthorized } from '../lib/errors.js';
 import { getModule } from '../modules/registry.js';
-import { superadminUsesDemoPassword } from '../sim/platform.js';
 
 const loginSchema = z.object({
   email: z.string().trim().toLowerCase().email('Enter a valid email'),
@@ -69,42 +68,4 @@ authRouter.post('/logout', authenticate, async (req, res) => {
 
 authRouter.get('/me', authenticate, (req, res) => {
   res.json({ user: safeUser(req.user), context: publicContext(req.ctx) });
-});
-
-/**
- * Demo helper for the login page (DEMO_MODE only): who can sign in to the simulated companies.
- * Public, so never the platform tenant, a superadmin or the superadmin password: while the superadmin
- * could still sign in with the shared demo password, the page lists the accounts without it.
- */
-authRouter.get('/demo-accounts', async (_req, res) => {
-  if (!env.DEMO_MODE) return res.json({ accounts: [] });
-  const password = (await superadminUsesDemoPassword()) ? '' : env.SIM_DEFAULT_PASSWORD;
-  const Company = getModule('companies').Model;
-  const User = getModule('users').Model;
-  const companies = await Company.find({ isSimulated: true, isPlatform: { $ne: true } })
-    .select('name')
-    .sort({ createdAt: 1 })
-    .lean();
-  const users = await User.find({
-    companyId: { $in: companies.map((c) => c._id) },
-    role: { $ne: 'superAdmin' },
-    deleted: { $ne: true },
-  })
-    .select('firstName lastName email role userTitle companyId')
-    .sort({ createdAt: 1 })
-    .lean();
-  res.json({
-    accounts: companies.map((c) => ({
-      company: c.name,
-      password,
-      users: users
-        .filter((u) => String(u.companyId) === String(c._id))
-        .map((u) => ({
-          email: u.email,
-          name: `${u.firstName} ${u.lastName ?? ''}`.trim(),
-          role: u.role,
-          title: u.userTitle,
-        })),
-    })),
-  });
 });

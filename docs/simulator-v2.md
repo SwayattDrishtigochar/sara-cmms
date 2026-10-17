@@ -19,18 +19,18 @@ sara-simulator (Pi / laptop)                         SARA server (Express)      
   machines → line protocol ├──▶ InfluxDB bucket=<companyId>                                │
   machine state (status, downtime, job counters) ──┐   │ live poller (3 s): Influx + Mongo ─┤ /api/live SSE
   people (WOs, job cards, requests, PMs, stock, …) ├──▶ MongoDB (same database) ◀──────────┤ REST
-  control loop (3 s) ◀── simcontrol / simevents ───┘   │ superadmin writes control + injections
+  control loop (3 s) ◀── simcontrol / simevents ───┘   │ control panel (:5090) writes control + injections
               └──▶ siminstances heartbeat, simactivity log, parameterspecs
 ```
 
-## 1. Shared collections (schemas live in `sara/server/src/db/models/Sim.js`; the simulator writes raw docs)
+## 1. Shared collections (schemas live in the simulator since phase 7; it writes raw docs — SARA only models `parameterspecs`, `sara/server/src/db/models/ParameterSpec.js`)
 
 | collection | writer | shape |
 |---|---|---|
 | `simstate` | simulator | `{ _id: <companyId ObjectId>, slug, seedVersion: 1\|2, seededAt, lastTelemetryAt, historyDays, backfillDays }` — **idempotency marker**: if it exists for the configured slug, seeding is skipped (later seed steps run once while `seedVersion` is lower, see §3) |
-| `simcontrol` | SARA superadmin (simulator reads every 3 s; creates it with defaults if missing) | `{ _id: 'default', companyId, running: true, telemetryTickMs: 5000, humanActivity: true, humanSpeed: 1, respondToAnomalies: false, backfill: { status: 'idle'\|'requested'\|'running'\|'done'\|'error', days, requestedAt, requestedBy, startedAt, finishedAt, progress, error, note }, updatedAt, updatedBy }` |
+| `simcontrol` | the simulator's own control panel (phase 7; before: SARA superadmin). The simulator reads it every 3 s and creates it with defaults if missing | `{ _id: 'default', companyId, running: true, telemetryTickMs: 5000, humanActivity: true, humanSpeed: 1, respondToAnomalies: false, backfill: { status: 'idle'\|'requested'\|'running'\|'done'\|'error', days, requestedAt, requestedBy, startedAt, finishedAt, progress, error, note }, updatedAt, updatedBy }` |
 | `siminstances` | simulator (every 3 s) | `{ _id: <SIM_INSTANCE>, name, hostname, platform, version, companyId, startedAt, lastSeenAt, stats: { uptimeSec, running, tickMs, humanSpeed, pointsWritten, pointsPerSec, bufferSize, droppedPoints, influxErrors, mongoErrors, cpuTempC, lastError, backfill: { active, progress }, people: { onShift, busy, actionsToday } }, statuses: { <assetId>: status }, injections: [{ id, assetId, scenario, phase, progress }], scenarios: [catalogue], profiles: { <type>: [spec] } }` — online = `lastSeenAt` within 15 s |
-| `simevents` | SARA creates (ground truth); simulator updates progress | `{ companyId, assetId, scenario, severity: low\|medium\|high, rampMin, holdMin, field?, affects: [field], startedAt, endsAt, clearedAt, clearedReason: 'superadmin'\|'repair'\|'expired', clearedBy, phase: 'ramp'\|'hold'\|'fade'\|'done', progress, createdBy }` — **active** = no `clearedAt` and `now < endsAt + 2 min fade`, except a `sudden_breakdown`, which stays active until its repair work order completes (the simulator then clears it with `clearedReason: 'repair'`, `clearedBy: <WO code>`); the simulator never reads ground truth for anything but applying it |
+| `simevents` | the control panel creates (ground truth; before phase 7: SARA superadmin); simulator updates progress | `{ companyId, assetId, scenario, severity: low\|medium\|high, rampMin, holdMin, field?, affects: [field], startedAt, endsAt, clearedAt, clearedReason: 'superadmin'\|'repair'\|'expired', clearedBy, phase: 'ramp'\|'hold'\|'fade'\|'done', progress, createdBy }` — **active** = no `clearedAt` and `now < endsAt + 2 min fade`, except a `sudden_breakdown`, which stays active until its repair work order completes (the simulator then clears it with `clearedReason: 'repair'`, `clearedBy: <WO code>`); the simulator never reads ground truth for anything but applying it |
 | `simactivity` | simulator (TTL 14 d) | `{ companyId, at, actor: { userId, name, role, title }, action, summary, target: { module, id, code }, details }` — one doc per simulated human action; `summary` is a plain sentence ("Ramesh Kumar started WO-112 · Hydraulic oil leak (IMM 3)") |
 | `parameterspecs` | simulator upserts at start | `{ assetType, measurement, field, unit, valueType, normalMin, normalMax }` (unique assetType+measurement+field) |
 
@@ -59,7 +59,7 @@ Dependencies: `mongodb` (official driver), `luxon`, `bcryptjs`. Node ≥ 22, ESM
 | `people/` | the human simulation (see §4): scheduler, personas, domain helpers |
 | `domain/` | write helpers that mirror SARA's business rules exactly: `counters.js` (`nextCode(companyId, plantId, type, prefix)` atomic `$inc` on `counters`), `workOrders.js` (create, assign, status transitions + stamping identical to `sara/server/src/modules/actions/workOrders.js`, comments, spare part consumption FIFO with `sparepartstransactions` "used" rows and lot decrement), `requests.js` (request + auto WO like `actions/requests.js`), `jobCards.js` (start, progress, complete with `completionMetrics`), `stock.js` (reorder/receipt), `notify.js` (notification docs like SARA's `notifyUsers`), `activity.js` (simactivity) |
 | `control.js` | every 3 s: read `simcontrol` + active `simevents`; apply running/tick/humanActivity/humanSpeed; start requested backfills; write `siminstances` heartbeat; update injection progress/phase; clear injections on repair |
-| `backfill.js` | telemetry history at 1-minute resolution (noise scaled by √(cadence/60 s)) for `BACKFILL_DAYS` on first run, gap backfill on restart (≤ `GAP_BACKFILL_MAX_HOURS`), superadmin-requested backfills (only for periods **without** data: from `max(now−days, lastTelemetryAt)`) |
+| `backfill.js` | telemetry history at 1-minute resolution (noise scaled by √(cadence/60 s)) for `BACKFILL_DAYS` on first run, gap backfill on restart (≤ `GAP_BACKFILL_MAX_HOURS`), backfills requested from the control panel (only for periods **without** data: from `max(now−days, lastTelemetryAt)`) |
 | `index.js` | orchestration: config → connect → ensureSeeded → specs → ensureBucket → backfill (first run / gap) → start loops (machines 1 s, state, people 15 s, world 30 s, control 3 s); SIGINT/SIGTERM: stop loops, set every machine OFF (timeline point + asset status) so nothing looks live, flush, close |
 
 All Mongo writes set `updatedAt` (and `createdAt` on insert) and the exact field names of SARA's registry
@@ -69,14 +69,14 @@ plant-scoped, `plantId`. SARA's `pnpm validate-db` must report **zero** schema e
 ## 3. Seed (first run, then versioned steps)
 
 Deterministic ids `oid(`${slug}:${key}`)` and PRNG seeded by the slug. Company: `COMPANY_NAME`,
-`COMPANY_DOMAIN`, industry "Automotive components", `isSimulated: true`, features production + energy on,
+`COMPANY_DOMAIN`, industry "Automotive components" (no simulator flag on the company since phase 7), features production + energy on,
 preferences Asia/Kolkata (`TIME_ZONE`), INR. **One plant** `PLANT_NAME` (code from name) with shifts A 06:00–14:00
 (tea 09:00–09:15, lunch 11:30–12:00), B 14:00–22:00 (tea 17:00–17:15, dinner 19:30–20:00), C 22:00–06:00 (tea
 01:00–01:15, meal 02:00–02:30), Monday–Saturday, holidays, energy tariffs (₹7.8 → ₹8.4 from 2026-07-01),
 emission factor 0.71.
 
 **People** (password `SIM_USER_PASSWORD`, bcrypt 10 rounds, emails `<key>@<domain>`; `shiftId` = plant shift
-`_id`; technicians get permission presets as in `sara/server/src/sim/blueprint.js`):
+`_id`; technicians get the permission presets of `sara-simulator/src/seed/blueprint.js`):
 
 | role | count | keys (title, department, shift) |
 |---|---|---|
@@ -155,15 +155,17 @@ notifications SARA would send.
 `MONGO_URI`, `INFLUX_URL`, `INFLUX_TOKEN`, `INFLUX_ORG`, `COMPANY_NAME`, `COMPANY_SLUG` (fixed ids derive from
 it), `COMPANY_DOMAIN`, `PLANT_NAME`, `TIME_ZONE`, `SIM_USER_PASSWORD`, `SIM_INSTANCE`, `TICK_MS`,
 `HISTORY_DAYS`, `ATTENDANCE_DAYS`, `BACKFILL_DAYS`, `GAP_BACKFILL_MAX_HOURS`, `HUMAN_ACTIVITY`, `HUMAN_SPEED`,
-`RESPOND_TO_ANOMALIES`, `SEED`, `LOG_LEVEL`, `BUFFER_MAX`. Runtime values in `simcontrol` (set from the
-superadmin page) override `TICK_MS`, `HUMAN_ACTIVITY`, `HUMAN_SPEED`, `RESPOND_TO_ANOMALIES` and running.
+`RESPOND_TO_ANOMALIES`, `SEED`, `LOG_LEVEL`, `BUFFER_MAX`, `SIM_UI_PORT`, `SIM_UI_HOST`, `SIM_UI_PASSWORD`. Runtime values in
+`simcontrol` (set from the control panel) override `TICK_MS`, `HUMAN_ACTIVITY`, `HUMAN_SPEED`, `RESPOND_TO_ANOMALIES` and running.
 
 ## 6. SARA side
 
-- `server/src/db/models/Sim.js`: `SimControl`, `SimInstance` (`siminstances`), `SimEvent` (+ `endsAt`, `clearedReason`,
-  `clearedBy`, `affects`, phases ramp/hold/fade/done), `SimActivity` (TTL 14 d), `SimState`, `ParameterSpec`.
-- Removed: device keys, `/api/sim/*`, `/api/ingest`, `server/src/sim/devices.js`, `server/src/telemetry/ingestRoutes.js`,
-  `server/src/telemetry/stateTracker.js` (moved into the simulator) and their tests.
+Phase 7 moved the control plane out of SARA: **the control plane is the simulator's own UI on port 5090**
+(`sara-simulator/src/ui/server.js` + `ui/`, see `phase7-contracts.md` §6/§7.5). SARA reads like a real platform and
+keeps only what a telemetry source needs:
+
+- `server/src/db/models/ParameterSpec.js` (`parameterspecs`): the only shared collection SARA models. `simstate`,
+  `simcontrol`, `siminstances`, `simevents`, `simactivity` and their schemas live in the simulator.
 - `server/src/telemetry/livePoller.js`: for each company with `/api/live` subscribers, every 3 s query Influx
   latest values (last 2 min, per field with its own time) and Mongo changes (asset status/since, new
   notifications, new downtimes, max `updatedAt` of workorders/jobcards/requests/anomalies/productionplans) and
@@ -171,22 +173,14 @@ superadmin page) override `TICK_MS`, `HUMAN_ACTIVITY`, `HUMAN_SPEED`, `RESPOND_T
   `notification`, `downtime`, `record { module }` with audience `{ plantId }`; stops when nobody listens.
   `GET /api/telemetry/latest` uses its cache when warm.
 - `/api/live`: re-checks the session every 60 s and closes when it expired; record events honour the plant rule.
-- Superadmin API `/api/admin/sim` (superAdmin only): `GET /status` → `{ control, instances: [{ …, online }],
-  company: { id, name, domain, seededAt, counts: { users, assets, workorders, jobcards, requests } } | null, scenarios,
-  injections }`; `PATCH /control` `{ running?, telemetryTickMs (1000–60000)?, humanActivity?, humanSpeed (1–120)?,
-  respondToAnomalies? }`; `POST /backfill` `{ days 1–30 }`; `POST /inject` `{ assetId, scenario, severity, rampMin
-  1–240, holdMin 0–1440, field? }` (asset must belong to the simulated company, scenario must be in the
-  catalogue and apply to the asset type) → `201 { event }`; `POST /clear` `{ eventId? , all? }` (only active ones);
-  `GET /events?limit=50`; `GET /activity?limit=50&before=`; `GET /credentials` → `{ users: [{ email, name, role,
-  title, department, shift }], password: env.SIM_DEFAULT_PASSWORD }`; `GET /assets`.
-- `pnpm seed` creates only the platform tenant + superadmin (`--demo` keeps the old generated test accounts).
-  `pnpm validate-db [--company <id>]` validates every document of a company against the registry schemas.
-- Registry gains `checkinouts` (Attendance) and `userbreaktimes` (Breaks): `checkinouts { userId→users!, plantId, shiftName, checkInTime!, checkOutTime, duration "HH:MM:SS" }`,
+- Removed from SARA in phase 7: `/api/admin/sim/*`, the Superadmin → Simulation tab, `GET /api/auth/demo-accounts`
+  and the login page's account list, `DEMO_MODE`, `SIM_DEFAULT_*`, `companies.isSimulated`, `pnpm seed --demo`
+  (the test fixture builder now lives in `server/test/helpers/fixtures.js`). Superadmin keeps the AI tab and gains a
+  read-only Platform tab (`GET /api/admin/platform/companies`).
+- `pnpm seed` creates only the platform tenant + superadmin. `pnpm validate-db [--company <id>]` validates every
+  document of one company (or of every company) against the registry schemas.
+- Registry has `checkinouts` (Attendance) and `userbreaktimes` (Breaks): `checkinouts { userId→users!, plantId, shiftName, checkInTime!, checkOutTime, duration "HH:MM:SS" }`,
   `userbreaktimes { userId→users!, checkInOutId→checkinouts, plantId, breakType, startTime!, endTime, duration "HH:MM:SS" }`.
-- Superadmin → Simulation tab: instance status, company card + credentials dialog (formula-safe CSV), controls
-  (running, tick, human activity, speed 1×/2×/5×/10×/30×/60×, respond to anomalies, backfill), anomaly lab
-  (asset → scenario → severity/ramp/hold → inject; active injections with phase/progress/clear; history with
-  cleared reason, e.g. "Fixed by WO-123"), live activity feed. No device registration and no account wizard.
 
 ## 7. Simulator internal API (binding for the parallel packages)
 

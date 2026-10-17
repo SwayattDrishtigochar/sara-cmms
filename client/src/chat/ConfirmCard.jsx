@@ -3,11 +3,10 @@ import { useState } from 'react';
 import { Link } from 'react-router';
 import { cellText } from '../blocks/DataTable.jsx';
 import { KpiPreview } from '../kpis/KpiPreviewBlock.jsx';
-import { cn } from '../lib/format.js';
+import { cn, humanize } from '../lib/format.js';
 import { useModuleMeta } from '../modules/useModules.js';
 import { PlanPreview } from '../planner/PlanBlock.jsx';
 import { useNow } from '../superadmin/parts.jsx';
-import { humanize } from '../superadmin/simUtils.js';
 import { Badge, Button } from '../ui/core.jsx';
 
 const HIDDEN = new Set([

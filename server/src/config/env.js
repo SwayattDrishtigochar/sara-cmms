@@ -26,7 +26,6 @@ const schema = z.object({
   CLIENT_URL: str('http://localhost:5173'),
   LOG_LEVEL: str('info'),
   LOG_PROMPTS: bool(),
-  DEMO_MODE: bool(),
 
   MONGO_URI: z.string().min(1, 'MONGO_URI is required'),
   MONGO_TEST_URI: str('mongodb://localhost:27017'),
@@ -51,6 +50,8 @@ const schema = z.object({
   GEMINI_FALLBACK_FAST: str('gemini-3.8-flash'),
   GEMINI_FALLBACK_BALANCED: str('gemini-3.6-flash'),
   GEMINI_FALLBACK_DEEP: str('gemini-3.6-flash'),
+  GEMINI_MODEL_VOICE: str('gemini-3.1-flash-live-preview'),
+  GEMINI_FALLBACK_VOICE: str('gemini-2.5-flash-native-audio-preview-12-2025'),
 
   MAX_ROWS: int(200),
   MAX_TOOL_ITERATIONS: int(6),
@@ -70,9 +71,6 @@ const schema = z.object({
 
   RATE_LIMIT_LOGIN_PER_MIN: int(10),
   RATE_LIMIT_MESSAGES_PER_MIN: int(30),
-
-  SIM_DEFAULT_PASSWORD: str('Sara@12345'),
-  SIM_DEFAULT_DOMAIN: str('swayatt.com'),
 });
 
 const parsed = schema.safeParse(process.env);

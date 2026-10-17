@@ -1,6 +1,8 @@
-import { PRIORITIES } from './maintenance.js';
+import { AI_TEXT, PRIORITIES } from './maintenance.js';
 
 const PRODUCTION = { feature: 'productionEnabled', permissionKey: 'production', group: 'Production' };
+export const PLAN_STATUSES = ['Draft', 'Pending', 'Planned', 'In Progress', 'Completed', 'Cancelled'];
+export const VERDICTS = ['doable', 'adjust', 'not_doable'];
 export const REJECTION_REASONS = [
   'Short Shot',
   'Flash',
@@ -31,6 +33,7 @@ export default [
     list: ['toolNumber', 'name', 'status', 'assets', 'idealCycleTimeSec', 'shotCount'],
     search: ['name', 'toolNumber', 'manufacturer'],
     sort: 'toolNumber',
+    children: [{ module: 'jobcards', field: 'tool', label: 'Job cards' }],
     fields: {
       name: { type: 'string', required: true },
       toolNumber: { type: 'string', label: 'Tool #' },
@@ -78,6 +81,7 @@ export default [
     list: ['customerCode', 'name', 'contactPerson', 'mobile', 'email'],
     search: ['name', 'customerCode', 'contactPerson', 'email', 'gstNumber'],
     sort: 'name',
+    children: [{ module: 'productionplans', field: 'customer', label: 'Production plans' }],
     fields: {
       name: { type: 'string', required: true },
       customerCode: { type: 'string' },
@@ -107,7 +111,8 @@ export default [
     singular: 'Production plan',
     icon: 'ClipboardList',
     description: 'Customer orders to produce: part, quantity and due date.',
-    agentNotes: 'The production planner turns a plan into job cards on capable machines.',
+    agentNotes:
+      'The production planner turns a plan into job cards on capable machines (plan_production, then apply_plan); the job cards link back with productionPlanId.',
     plantScoped: true,
     planned: true,
     counter: { type: 'ProductionPlan', prefix: 'PP-', field: 'reqId' },
@@ -118,6 +123,7 @@ export default [
     dateField: 'dueDate',
     sort: 'dueDate',
     indexes: [[{ companyId: 1, updatedAt: 1 }]], // live poller: recent changes
+    children: [{ module: 'jobcards', field: 'productionPlanId', label: 'Job cards' }],
     fields: {
       reqId: { type: 'string', readOnly: true, label: 'Plan #' },
       partName: { type: 'string', required: true, label: 'Part' },
@@ -126,23 +132,32 @@ export default [
       tool: { type: 'ref', ref: 'tools', label: 'Preferred tool' },
       dueDate: { type: 'date', required: true },
       priority: { type: 'enum', values: PRIORITIES, default: 'Medium' },
-      status: {
-        type: 'enum',
-        values: ['Pending', 'Planned', 'In Progress', 'Completed'],
-        default: 'Pending',
-      },
+      status: { type: 'enum', values: PLAN_STATUSES, default: 'Pending' },
       description: { type: 'text' },
       feasibility: {
         type: 'object',
         readOnly: true,
         fields: {
           feasible: { type: 'boolean' },
+          verdict: { type: 'enum', values: VERDICTS },
+          dueDate: { type: 'date' },
           projectedFinish: { type: 'date' },
-          slackHours: { type: 'number' },
-          shortfall: { type: 'number' },
+          slackHours: { type: 'number', unit: 'h' },
+          shortfall: { type: 'number', unit: 'pcs' },
+          issues: {
+            type: 'array',
+            rowIds: false,
+            of: {
+              kind: { type: 'string' },
+              severity: { type: 'enum', values: ['warning', 'critical'], default: 'warning' },
+              text: { type: 'string', max: 300 },
+            },
+          },
           notes: { type: 'text' },
         },
       },
+      aiSummary: AI_TEXT,
+      proposal: { type: 'ref', ref: 'planproposals', readOnly: true, label: 'Proposal' },
     },
   },
   {
@@ -154,7 +169,7 @@ export default [
     icon: 'ClipboardCheck',
     description: 'Production jobs: a mould on a machine with a target quantity.',
     agentNotes:
-      'startDate/endDate are the planned window. Progress: operations[0].progress.partsOut; quality/OEE in completionMetrics.',
+      'startDate/endDate are the planned window; assignedTo are the operators (operatorPlan says who runs which shift). Progress: operations[0].progress.partsOut; quality/OEE in completionMetrics.',
     plantScoped: true,
     planned: true,
     counter: { type: 'JobCard', prefix: 'JC-', field: 'jobCardId' },
@@ -185,7 +200,18 @@ export default [
       endDate: { type: 'date', label: 'Planned end' },
       actualStart: { type: 'date', readOnly: true },
       actualEnd: { type: 'date', readOnly: true },
-      assignedTo: { type: 'refs', ref: 'users' },
+      assignedTo: { type: 'refs', ref: 'users', label: 'Operators' },
+      operatorPlan: {
+        type: 'array',
+        label: 'Operators by shift',
+        rowIds: false,
+        of: {
+          user: { type: 'ref', ref: 'users', required: true },
+          shiftName: { type: 'string' },
+          start: { type: 'date' },
+          end: { type: 'date' },
+        },
+      },
       rejectionPercentage: { type: 'number', min: 0, max: 100, unit: '%', label: 'Expected rejection' },
       totalShotCount: { type: 'number', min: 0, default: 0, readOnly: true },
       mouldParts: {

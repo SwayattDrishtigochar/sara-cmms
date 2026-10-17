@@ -3,7 +3,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { influxEnabled, pingInflux } from '../src/config/influx.js';
-import { ParameterSpec } from '../src/db/models/Sim.js';
+import { ParameterSpec } from '../src/db/models/ParameterSpec.js';
 import { publish } from '../src/lib/events.js';
 import { getModule } from '../src/modules/registry.js';
 import { telemetryRouter } from '../src/routes/telemetry.js';

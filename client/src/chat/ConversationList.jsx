@@ -1,4 +1,4 @@
-import { MessageSquareText, MoreHorizontal, Pencil, Plus, Search, Trash2 } from 'lucide-react';
+import { MessageSquareText, Mic, MoreHorizontal, Pencil, Plus, Search, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { NavLink } from 'react-router';
 import { toast } from 'sonner';
@@ -76,11 +76,14 @@ const Row = ({ item, onNavigate, onDelete }) => {
         onClick={onNavigate}
         className={({ isActive }) =>
           cn(
-            'flex h-9 items-center rounded-lg pr-8 pl-2.5 text-sm transition-colors',
+            'flex h-9 items-center gap-1.5 rounded-lg pr-8 pl-2.5 text-sm transition-colors',
             isActive ? 'bg-brand-soft font-medium text-brand' : 'text-fg hover:bg-surface-2',
           )
         }
       >
+        {item.voice && (
+          <Mic className="size-3.5 shrink-0 text-ai" role="img" aria-label="Voice conversation" />
+        )}
         <span className="truncate">{title}</span>
       </NavLink>
       <Menu

@@ -12,11 +12,8 @@ const liveSession = (sessionId, userId) => ({
 });
 const activeUser = (userId) => ({ _id: userId, deleted: { $ne: true } });
 
-/** Resolves the Bearer token → session → user → request context (req.ctx). */
-export const authenticate = async (req, _res, next) => {
-  const [scheme, token] = (req.headers.authorization ?? '').split(' ');
-  if (scheme !== 'Bearer' || !token) throw unauthorized('Sign in to continue');
-
+/** Bearer token → { user, sessionId, tokenExpiresAt, ctx }; throws the same 401s as authenticate. */
+export const userFromToken = async (token) => {
   let payload;
   try {
     payload = verifyToken(token);
@@ -29,10 +26,19 @@ export const authenticate = async (req, _res, next) => {
   const user = await getModule('users').Model.findOne(activeUser(payload.userId)).lean();
   if (!user) throw unauthorized('Your account is no longer active');
 
-  req.user = user;
-  req.sessionId = session.sessionId;
-  req.tokenExpiresAt = payload.exp ? payload.exp * 1000 : null;
-  req.ctx = await buildUserContext(user);
+  return {
+    user,
+    sessionId: session.sessionId,
+    tokenExpiresAt: payload.exp ? payload.exp * 1000 : null,
+    ctx: await buildUserContext(user),
+  };
+};
+
+/** Resolves the Bearer token → session → user → request context (req.ctx). */
+export const authenticate = async (req, _res, next) => {
+  const [scheme, token] = (req.headers.authorization ?? '').split(' ');
+  if (scheme !== 'Bearer' || !token) throw unauthorized('Sign in to continue');
+  Object.assign(req, await userFromToken(token));
   next();
 };
 

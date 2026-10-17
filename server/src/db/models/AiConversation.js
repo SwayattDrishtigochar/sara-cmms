@@ -17,6 +17,7 @@ const conversationSchema = new mongoose.Schema(
     summarizedUpTo: { type: Number, default: 0 },
     lastMessageAt: { type: Date, default: Date.now },
     deleted: { type: Boolean, default: false },
+    voice: { type: Boolean, default: false }, // set by the first persisted voice turn (phase 8)
   },
   { collection: 'ai_conversations', timestamps: true, versionKey: false, minimize: false },
 );

@@ -24,6 +24,7 @@
     "mongoose": "^8.24.5",
     "pino": "^10.4.0",
     "pino-http": "^11.0.0",
+    "ws": "^8.22.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {

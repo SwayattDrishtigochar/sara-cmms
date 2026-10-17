@@ -6,6 +6,7 @@ import { useUi } from '../store/ui.js';
 import { Avatar, Badge, Button } from '../ui/core.jsx';
 import { Select } from '../ui/form.jsx';
 import { Menu, MenuItem, MenuLabel, MenuSeparator } from '../ui/overlay.jsx';
+import { VoiceButton } from '../voice/VoiceButton.jsx';
 import { NotificationsBell } from './NotificationsBell.jsx';
 
 const THEMES = [
@@ -71,6 +72,7 @@ export const Header = ({ extra }) => {
 
       {extra}
       <PlantSwitcher ctx={ctx} />
+      {!ctx.company.isPlatform && <VoiceButton />}
       {!ctx.company.isPlatform && <AskSara shortcut />}
       <NotificationsBell />
 

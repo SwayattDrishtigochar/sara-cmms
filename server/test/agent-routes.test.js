@@ -53,7 +53,11 @@ describe('conversations', () => {
     const created = await request(app).post('/api/conversations').set(as('owner')).send({ title: 'Energy' });
     expect(created.status).toBe(201);
     const { id } = created.body.conversation;
-    expect(created.body.conversation).toMatchObject({ title: 'Energy', tierPreference: 'auto' });
+    expect(created.body.conversation).toMatchObject({
+      title: 'Energy',
+      tierPreference: 'auto',
+      voice: false,
+    });
 
     for (let i = 0; i < 31; i++) await newConversation();
     const first = await request(app).get('/api/conversations').set(as('owner'));
@@ -121,6 +125,7 @@ describe('conversations', () => {
     await AiMessage.collection.insertMany([row(new Date(Date.now() - 10 * 60_000)), row(new Date())]);
     const thread = await request(app).get(`/api/conversations/${id}`).set(as('owner'));
     expect(thread.body.messages.map((m) => m.status)).toEqual(['error', 'streaming']);
+    expect(thread.body.messages.map((m) => m.channel)).toEqual(['text', 'text']); // older docs have no channel
   });
 });
 
@@ -212,6 +217,33 @@ describe('messages over SSE', () => {
     const thread = await request(app).get(`/api/conversations/${id}`).set(as('owner'));
     expect(thread.body.messages.at(-1).pendingAction).toMatchObject({ id: second, status: 'rejected' });
     expect(thread.body.messages.at(-1).pendingAction.siblingResponses).toBeUndefined();
+  });
+
+  it('confirming a change left pending by a voice turn runs on a text tier', async () => {
+    script(/comment on wo-42 by voice/i, [
+      { calls: [{ name: 'add_work_order_comment', args: { workOrder: 'WO-42', comment: 'Seal kit here' } }] },
+      ({ responses }) => ({
+        text: responses[0]?.response?.status === 'confirmed' ? 'Comment added.' : 'Nothing changed.',
+      }),
+    ]);
+    const { id } = await newConversation();
+    const first = parseSse(
+      (await post('owner', `/conversations/${id}/messages`, { text: 'Add a comment on WO-42 by voice' }))
+        .body,
+    );
+    const { actionId } = first.find((e) => e.event === 'block' && e.data.type === 'confirm').data.payload;
+    const messageId = first[0].data.messageId;
+    await AiMessage.updateOne(
+      { _id: messageId },
+      { $set: { tier: 'voice', channel: 'voice', model: 'gemini-live-mock' } },
+    );
+
+    const events = parseSse((await post('owner', `/conversations/${id}/actions/${actionId}/confirm`)).body);
+    expect(events[0].data.tier).toBe('balanced');
+    expect(events.find((e) => e.event === 'error')).toBeUndefined();
+    expect(events.at(-1).data).toMatchObject({ status: 'complete', messageId });
+    const thread = await request(app).get(`/api/conversations/${id}`).set(as('owner'));
+    expect(thread.body.messages.at(-1)).toMatchObject({ text: 'Comment added.', channel: 'voice' });
   });
 
   it('stop answers ok:false for a message that is not streaming', async () => {

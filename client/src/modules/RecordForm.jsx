@@ -15,17 +15,29 @@ const editableFields = (meta, ctx, isNew) =>
       !(f.key === 'plantId' && ctx?.plantLocked),
   );
 
-/** Create (no record) or edit a record of any module, driven by its field metadata. */
-export const RecordForm = ({ meta, record, onDone, onCancel }) => {
+const idOf = (v) => (v && typeof v === 'object' ? String(v._id) : v);
+
+/** Ref values may be populated records (a pre-filled parent keeps its label); the API gets ids. */
+const refIds = (f, value) =>
+  f.type === 'ref' ? idOf(value) : f.type === 'refs' ? (value ?? []).map(idOf) : value;
+
+/**
+ * Create (no record) or edit a record of any module, driven by its field metadata.
+ * `defaults` pre-fills a create (form-shaped values; a ref may be the populated record).
+ */
+export const RecordForm = ({ meta, record, defaults, onDone, onCancel }) => {
   const ctx = useSession();
   const isNew = !record;
   const fields = useMemo(() => editableFields(meta, ctx, isNew), [meta, ctx, isNew]);
   const initial = useMemo(
     () =>
       Object.fromEntries(
-        fields.map((f) => [f.key, isNew ? emptyValue(f) : f.secret ? '' : toFormValue(f, record?.[f.key])]),
+        fields.map((f) => [
+          f.key,
+          isNew ? (defaults?.[f.key] ?? emptyValue(f)) : f.secret ? '' : toFormValue(f, record?.[f.key]),
+        ]),
       ),
-    [fields, record, isNew],
+    [fields, record, isNew, defaults],
   );
   const [values, setValues] = useState(initial);
   const [errors, setErrors] = useState({});
@@ -39,7 +51,7 @@ export const RecordForm = ({ meta, record, onDone, onCancel }) => {
       const changed = JSON.stringify(values[f.key]) !== JSON.stringify(initial[f.key]);
       if (!isNew && !changed) continue;
       try {
-        const v = fromFormValue(f, values[f.key]);
+        const v = fromFormValue(f, refIds(f, values[f.key]));
         if (isNew && (v === null || (Array.isArray(v) && v.length === 0))) continue;
         if (f.secret && !v) continue;
         payload[f.key] = v;

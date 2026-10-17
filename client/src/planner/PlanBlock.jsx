@@ -1,19 +1,23 @@
 import {
+  CalendarCheck,
   CalendarRange,
   CircleCheck,
   Clock,
   ExternalLink,
   Factory,
+  OctagonAlert,
   Pencil,
   Plus,
   Sparkles,
   TriangleAlert,
+  Users,
   Wrench,
 } from 'lucide-react';
 import { Link } from 'react-router';
-import { cn, formatNumber } from '../lib/format.js';
+import { cn, formatDateTime, formatMoney, formatNumber } from '../lib/format.js';
 import { Badge, Card, CardHeader } from '../ui/core.jsx';
 import { delayText, Gantt } from './Gantt.jsx';
+import { VERDICT_LABEL, verdictTone } from './planEdits.js';
 
 /** 6 → "6 h", 5.46 → "5.5 h". */
 export const hoursText = (h) => `${Number(Math.abs(h ?? 0).toFixed(Math.abs(h) < 10 ? 1 : 0))} h`;
@@ -48,6 +52,21 @@ export const FeasibilityBadge = ({ feasibility, kind, className }) => {
   );
 };
 
+const VERDICT_ICON = { good: CircleCheck, warn: TriangleAlert, critical: OctagonAlert };
+const VERDICT_TONE = { good: 'success', warn: 'warn', critical: 'critical' };
+/** Doable / Needs adjustment / Not doable (icon + words, never colour alone); null without a verdict. */
+export const VerdictBadge = ({ verdict, className }) => {
+  if (!verdict) return null;
+  const tone = verdictTone(verdict);
+  const Icon = VERDICT_ICON[tone];
+  return (
+    <Badge tone={VERDICT_TONE[tone]} className={className}>
+      <Icon className="size-3.5" aria-hidden />
+      {VERDICT_LABEL[verdict] ?? verdict}
+    </Badge>
+  );
+};
+
 const STATUS = {
   draft: { label: 'Draft', tone: 'ai' },
   applying: { label: 'Applying', tone: 'brand' },
@@ -62,16 +81,87 @@ export const ProposalStatusBadge = ({ status }) => {
   return <Badge tone={s.tone}>{s.label}</Badge>;
 };
 
-export const KindIcon = ({ kind, className }) => {
-  const Icon = kind === 'maintenance' ? Wrench : Factory;
-  return (
-    <Icon
-      className={cn('size-4 shrink-0 text-muted', className)}
-      role="img"
-      aria-label={kind === 'maintenance' ? 'Maintenance plan' : 'Production plan'}
-    />
-  );
+const KIND = {
+  maintenance: { icon: Wrench, label: 'Maintenance window' },
+  maintenance_plan: { icon: CalendarCheck, label: 'Maintenance plan' },
+  production: { icon: Factory, label: 'Production plan' },
 };
+export const KindIcon = ({ kind, className }) => {
+  const k = KIND[kind] ?? KIND.production;
+  return <k.icon className={cn('size-4 shrink-0 text-muted', className)} role="img" aria-label={k.label} />;
+};
+
+const Tile = ({ label, value, sub, tone }) => (
+  <div className="rounded-lg border border-border bg-surface px-3 py-2">
+    <dt className="text-[11px] text-muted">{label}</dt>
+    <dd className={cn('text-base font-semibold text-fg tabular', tone === 'critical' && 'text-critical')}>
+      {value}
+    </dd>
+    {sub && <dd className="text-[11px] text-subtle tabular">{sub}</dd>}
+  </div>
+);
+
+/** Maintenance plan metrics as stat tiles: production impact, downtime cost avoided, zero-impact tasks. */
+export const MetricTiles = ({ metrics: m, className }) =>
+  m ? (
+    <dl className={cn('grid grid-cols-2 gap-2 sm:grid-cols-4', className)}>
+      <Tile
+        label="Production impact"
+        value={hoursText(m.productionHoursLost)}
+        sub={m.productionImpactCost != null ? formatMoney(m.productionImpactCost) : null}
+        tone={m.productionHoursLost > 0 ? 'critical' : undefined}
+      />
+      <Tile
+        label="Downtime cost avoided"
+        value={formatMoney(m.downtimeCostAvoided ?? 0)}
+        sub={
+          m.naiveProductionHoursLost != null
+            ? `vs ${hoursText(m.naiveProductionHoursLost)} if done at once`
+            : null
+        }
+      />
+      <Tile label="Zero-impact tasks" value={`${m.zeroImpactTasks ?? 0} of ${m.tasks ?? 0}`} />
+      <Tile label="Tasks" value={m.tasks ?? 0} />
+    </dl>
+  ) : null;
+
+/** One line per job card with its operators (`payload.jobCards[].operators`). */
+export const OperatorLines = ({ jobCards, className }) =>
+  jobCards?.length ? (
+    <ul className={cn('space-y-1 text-xs text-muted', className)} aria-label="Operators per job card">
+      {jobCards.slice(0, 10).map((c, i) => (
+        <li key={c.key ?? i} className="flex items-start gap-1.5">
+          <Users className="mt-0.5 size-3 shrink-0" aria-hidden />
+          <span>
+            <span className="font-medium text-fg">{c.asset}</span>
+            {c.target != null && ` · ${formatNumber(c.target)} pcs`}
+            {' · '}
+            {c.operators?.length
+              ? [...new Set(c.operators.map((o) => o.name ?? o.userId))].join(', ')
+              : 'no operator yet'}
+          </span>
+        </li>
+      ))}
+    </ul>
+  ) : null;
+
+/** Tasks of a maintenance plan with their technician (`payload.tasks`). */
+export const TaskLines = ({ tasks, className }) =>
+  tasks?.length ? (
+    <ul className={cn('space-y-1 text-xs text-muted', className)} aria-label="Maintenance tasks">
+      {tasks.slice(0, 10).map((t) => (
+        <li key={t.key} className="flex items-start gap-1.5">
+          <Wrench className="mt-0.5 size-3 shrink-0" aria-hidden />
+          <span>
+            <span className="font-medium text-fg">{t.asset}</span> · {t.title} · {formatDateTime(t.start)} ·{' '}
+            {t.technician?.name ?? 'nobody free yet'}
+            {t.zeroImpact ? ' · no impact' : t.impactHours ? ` · ${hoursText(t.impactHours)} moved` : ''}
+            {t.late && <span className="text-critical"> · after its deadline</span>}
+          </span>
+        </li>
+      ))}
+    </ul>
+  ) : null;
 
 /** `JC-14 +2.0 h` chips; a delay that makes its plan late is critical (icon + word, not colour alone). */
 export const DelayChips = ({ delays, className }) =>
@@ -172,7 +262,7 @@ export const OptionCards = ({ options, value, onChange, name = 'plan-option' }) 
   );
 };
 
-/** Chat `plan` block: compact Gantt with SARA's ghost bars, feasibility, delays, options and a Planner link. */
+/** Chat `plan` block: compact Gantt with SARA's ghost bars, verdict, operators/tasks, delays, options and a Planner link. */
 export const PlanBlock = ({ payload }) => {
   const p = payload ?? {};
   const kind = p.proposal?.kind;
@@ -181,15 +271,19 @@ export const PlanBlock = ({ payload }) => {
       <CardHeader
         icon={CalendarRange}
         title={p.title ?? p.proposal?.title ?? 'Machine schedule'}
-        subtitle={
-          p.proposal
-            ? `${p.proposal.code} · ${kind === 'maintenance' ? 'Maintenance' : 'Production'} plan`
-            : null
+        subtitle={p.proposal ? `${p.proposal.code} · ${(KIND[kind] ?? KIND.production).label}` : null}
+        actions={
+          <>
+            <VerdictBadge verdict={p.verdict ?? p.feasibility?.verdict} />
+            <FeasibilityBadge feasibility={p.feasibility} kind={kind} />
+          </>
         }
-        actions={<FeasibilityBadge feasibility={p.feasibility} kind={kind} />}
       />
       <div className="space-y-3 p-3">
         <Gantt data={p} compact />
+        <MetricTiles metrics={p.metrics} />
+        <OperatorLines jobCards={p.jobCards} />
+        <TaskLines tasks={p.tasks} />
         <DelayChips delays={p.delays} />
         <OptionCards options={p.options} />
         {p.risks?.length > 0 && (
@@ -228,10 +322,14 @@ export const PlanPreview = ({ payload }) => {
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
+        <VerdictBadge verdict={plan.verdict ?? plan.feasibility?.verdict} />
         <FeasibilityBadge feasibility={plan.feasibility} kind={payload?.proposal?.kind} />
         {chosen && <Badge tone="ai">{chosen.label}</Badge>}
       </div>
       <Gantt data={plan} compact />
+      <MetricTiles metrics={plan.metrics} />
+      <OperatorLines jobCards={plan.jobCards} />
+      <TaskLines tasks={plan.tasks} />
       <DelayChips delays={plan.delays} />
       {payload?.ops?.length > 0 && (
         <ol className="divide-y divide-border rounded-lg border border-border text-sm">

@@ -16,7 +16,7 @@ const measure = async () => {
 };
 
 /**
- * Now by MongoDB's clock (ms). The simulator stamps heartbeats, telemetry and simevents with that clock
+ * Now by MongoDB's clock (ms). The telemetry source stamps heartbeats and telemetry with that clock
  * (a Pi has no RTC), so "online", "fresh" and injection timing compare against it, not against this host,
  * whose clock may differ. The offset is re-measured at most once a minute; on failure the last one stays.
  */

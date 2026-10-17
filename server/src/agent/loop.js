@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { normalizeUsage } from '../ai/budget.js';
+import { TIERS } from '../ai/settings.js';
 import { env } from '../config/env.js';
 import { AiConversation } from '../db/models/AiConversation.js';
 import { AiMessage } from '../db/models/AiMessage.js';
@@ -60,7 +61,7 @@ const toolError = (err, name) => {
 };
 
 /** zod check + run (or preview) with a timeout; never throws except on abort. */
-const execute = async ({ tool, args, ctx, io, mode = 'run' }) => {
+export const execute = async ({ tool, args, ctx, io, mode = 'run' }) => {
   const started = Date.now();
   const parsed = tool.schema.safeParse(args ?? {});
   if (!parsed.success) {
@@ -80,7 +81,8 @@ const execute = async ({ tool, args, ctx, io, mode = 'run' }) => {
   }
 };
 
-const audit = (ctx, ids, name, outcome) =>
+/** Writes one AiToolAudit row for a tool call (args redacted). */
+export const audit = (ctx, ids, name, outcome) =>
   AiToolAudit.create({
     companyId: ctx.companyId,
     userId: ctx.userId,
@@ -199,7 +201,8 @@ export const runTurn = async ({
     });
   }
 
-  let tier = continuation ? (message.tier ?? 'balanced') : decision.tier;
+  // A voice turn stores tier 'voice' (the Live model); its text continuation runs on a normal tier.
+  let tier = continuation ? (TIERS.includes(message.tier) ? message.tier : 'balanced') : decision.tier;
   let info = await tierInfo(tier);
   const loaded = new Set(
     [...(conversation.loadedGroups ?? []), ...(decision.groups ?? [])].filter((g) => available.includes(g)),

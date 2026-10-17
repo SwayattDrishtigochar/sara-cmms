@@ -5,6 +5,7 @@ import { planningTools } from '../../planning/tools.js';
 import { healthTools } from './health.js';
 import { GROUP_HELP, LOADABLE_GROUPS, loadTools } from './load.js';
 import { mongoReadTools } from './mongo.read.js';
+import { navigateTools } from './navigate.js';
 import { presentTools } from './present.js';
 import { resolveTools } from './resolve.js';
 import { summaryTools } from './summaries.js';
@@ -26,6 +27,7 @@ const list = [
   ...resolveTools,
   ...mongoReadTools,
   ...presentTools,
+  ...navigateTools,
   ...loadTools,
   ...summaryTools,
   ...telemetryTools,

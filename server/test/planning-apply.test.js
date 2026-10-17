@@ -116,7 +116,7 @@ describe('planning tools', () => {
       quantity: 2000,
       dueDate: new Date(Date.now() + 12 * DAY).toISOString().slice(0, 10),
     });
-    expect(planned.summary).toMatch(/^PLN-\d+ · \d job cards? · on time/);
+    expect(planned.summary).toMatch(/^PLN-\d+ · \d job cards? · (doable \(|needs adjustment)/);
     expect(planned.blocks[0].type).toBe('plan');
     expect(planned.blocks[0].payload.bars.some((b) => b.ghost)).toBe(true);
     const { proposalId } = planned.forModel;
@@ -166,7 +166,7 @@ describe('planning routes', () => {
     expect(res.status).toBe(200);
     expect(res.body.proposal.explanation).toMatchObject({
       mock: true,
-      text: expect.stringContaining('fits'),
+      text: expect.stringMatching(/^(Doable|Needs adjustment):/),
     });
     expect(res.body.plan.proposal.code).toBe(res.body.proposal.proposalCode);
     const id = res.body.proposal._id;
@@ -189,7 +189,10 @@ describe('planning routes', () => {
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('PLAN_CHANGED');
     const fresh = await getProposal(owner, res.body.error.details.proposalId);
-    expect(fresh.explanation).toMatchObject({ mock: true, text: expect.stringContaining('fits') });
+    expect(fresh.explanation).toMatchObject({
+      mock: true,
+      text: expect.stringMatching(/^(Doable|Needs adjustment):/),
+    });
     await discardProposal(owner, fresh._id);
   });
 
@@ -203,6 +206,7 @@ describe('planning routes', () => {
     expect(housing.tools.map((t) => t.toolNumber)).toEqual(
       expect.arrayContaining(['T-101', 'T-102', 'T-103']),
     );
+    expect(housing.tools[0].assets[0]).toEqual({ id: expect.any(String), label: expect.any(String) });
     const denied = await request(app)
       .post('/api/planning/production')
       .set(as('viewer'))

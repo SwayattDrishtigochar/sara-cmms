@@ -1,7 +1,7 @@
 import { DateTime } from 'luxon';
 
 /**
- * Shift calendar maths shared by the simulator config, the downtime tracker and the planners.
+ * Shift calendar maths shared by the telemetry source, the downtime tracker and the planners.
  *
  * Rules (ported from CMMS plantModel/oeeService, with its overnight-break bug fixed):
  *  - shift times are "HH:mm" in the plant's time zone; end ≤ start means the shift ends next day;

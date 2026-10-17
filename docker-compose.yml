@@ -1,9 +1,9 @@
 # Dev databases: docker compose up -d                       → MongoDB + InfluxDB (then `pnpm dev`)
 # Full stack:    docker compose --profile app up -d --build  → + server (:5080) and web app (http://localhost:8080)
-# Simulator:     docker compose --profile sim up -d --build  → + ../sara-simulator (writes MongoDB + InfluxDB)
+# Telemetry:     docker compose --profile sim up -d --build  → + ../sara-simulator (writes MongoDB + InfluxDB, control panel on :5090)
 # Everything:    docker compose --profile app --profile sim up -d --build
 # Variables come from ./.env (copy .env.example). Keep the project and volume names: they hold the dev data.
-# 27017 and 8086 are published on purpose: a simulator on a Raspberry Pi writes both over the LAN (no auth: demo LAN only).
+# 27017 and 8086 are published on purpose: a telemetry source on a Raspberry Pi writes both over the LAN (no auth: LAN only).
 name: sara
 
 services:
@@ -65,15 +65,16 @@ services:
   simulator:
     profiles: [sim]
     build: ../sara-simulator
-    # Optional: the simulator's defaults (Acme Components, swayatt.com …) apply without it.
+    # Its own .env carries the company, SIM_USER_PASSWORD, SIM_UI_PASSWORD and SIM_UI_PORT (control panel).
     env_file: [{ path: ../sara-simulator/.env, required: false }]
     environment:
       MONGO_URI: mongodb://mongo:27017/sara
       INFLUX_URL: http://influxdb:8086
       INFLUX_TOKEN: ${INFLUX_TOKEN:-sara-dev-token}
       INFLUX_ORG: ${INFLUX_ORG:-sara}
-      SIM_USER_PASSWORD: ${SIM_DEFAULT_PASSWORD:-Sara@12345} # SARA shows this password for the simulated users
+      SIM_USER_PASSWORD: ${SIM_USER_PASSWORD:-Sara@12345}
       SIM_INSTANCE: ${SIM_INSTANCE:-docker}
+    ports: ["5090:5090"]
     restart: unless-stopped
     stop_grace_period: 15s # on SIGTERM it sets every machine OFF and flushes (≤ 10 s)
     depends_on:

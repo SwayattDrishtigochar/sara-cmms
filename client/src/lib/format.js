@@ -132,8 +132,76 @@ export const refLabel = (value) => {
     value.toolNumber ??
     value.partNumber ??
     value.binRfId ??
-    value.plantCode;
-  const title = value.name ?? value.jobName ?? value.partName ?? value.summary ?? value.message?.title;
+    value.plantCode ??
+    value.planCode ??
+    value.proposalCode;
+  const title =
+    value.name ?? value.jobName ?? value.partName ?? value.summary ?? value.message?.title ?? value.title;
   if (code && title) return `${code} · ${title}`;
   return title ?? code ?? String(value._id ?? '');
+};
+
+export const plural = (n, word) => `${n} ${n === 1 ? word : `${word}s`}`;
+
+/** "bearing_wear" → "Bearing wear". */
+export const humanize = (id = '') => {
+  const text = String(id).replace(/[_-]+/g, ' ').trim();
+  return text.charAt(0).toUpperCase() + text.slice(1);
+};
+
+/** Mirrors the server's slugify (file names). */
+export const slugify = (text) =>
+  String(text)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 30) || 'company';
+
+/** A cell a spreadsheet would run as a formula (= + - @ tab CR) gets a leading quote, so it stays text. */
+export const safeCell = (cell) => {
+  const text = String(cell ?? '');
+  return /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
+};
+
+/** Rows of cells → CSV, or TSV with sep '\t'; formula-safe, and cells holding the separator, quotes or newlines are quoted. */
+export const toDelimited = (rows, sep = ',') =>
+  rows
+    .map((row) =>
+      row
+        .map((cell) => {
+          const text = safeCell(cell);
+          return text.includes(sep) || /["\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+        })
+        .join(sep),
+    )
+    .join('\n');
+
+/** Copies text; falls back to a hidden textarea where the Clipboard API is missing (http on a LAN IP). */
+export const copyText = async (text) => {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const previous = document.activeElement;
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    // Next to the focused button, so an open dialog's focus trap doesn't pull focus back mid-copy.
+    (previous?.parentElement ?? document.body).append(area);
+    area.select();
+    const ok = document.execCommand('copy');
+    area.remove();
+    previous?.focus?.();
+    if (!ok) throw new Error('Copy is blocked in this browser');
+  }
+};
+
+/** Saves text as a file. */
+export const downloadText = (filename, text, type = 'text/csv;charset=utf-8') => {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const link = Object.assign(document.createElement('a'), { href: url, download: filename });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 };

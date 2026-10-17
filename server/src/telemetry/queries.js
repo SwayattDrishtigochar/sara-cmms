@@ -111,7 +111,7 @@ export const latestValues = async (companyId, assetIds, { lookback = '-7d' } = {
   const latest = new Map(ids.map((id) => [id, {}]));
   if (!ids.length) return latest;
   // last() per series pushes down (one block per series); then the newest across status series.
-  // Stop a minute ahead: the simulator stamps points with MongoDB's clock, which may run a little ahead.
+  // Stop a minute ahead: the telemetry source stamps points with MongoDB's clock, which may run a little ahead.
   const query = flux`${source(companyId, ids, fluxDuration(lookback), new Date(Date.now() + MIN))}
   |> filter(fn: (r) => r._measurement != "timelineData")
   |> last()

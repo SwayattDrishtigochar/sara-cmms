@@ -1,9 +1,8 @@
 import { Check, Copy, RefreshCw } from 'lucide-react';
 import { useEffect, useId, useState } from 'react';
 import { toast } from 'sonner';
-import { cn } from '../lib/format.js';
+import { cn, copyText } from '../lib/format.js';
 import { Button } from '../ui/core.jsx';
-import { copyText } from './simUtils.js';
 
 /** Re-renders every `ms` so relative times ("last seen 3 s ago") stay true between polls. */
 export const useNow = (ms = 1000) => {

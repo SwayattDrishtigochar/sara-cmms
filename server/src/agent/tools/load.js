@@ -13,7 +13,7 @@ export const GROUP_HELP = {
   write:
     'create, update, delete records; change work order status; add work order comments (always confirmed by the user)',
   planning:
-    'machine capacity calendar, production planning by part, quantity and due date, maintenance windows with push options, applying a plan (always confirmed by the user)',
+    'machine capacity calendar, production plans by part, quantity and due date with operators per shift, maintenance plans for a plant or assets with technicians and production impact, single maintenance windows with push options, checking an edited plan, applying a plan (always confirmed by the user)',
   cost: 'cost summaries: energy, spare parts, consumables, labour and downtime by asset, plant, category or day',
   kpi: 'create, change and list KPI cards on the KPI Builder page (always confirmed by the user)',
 };

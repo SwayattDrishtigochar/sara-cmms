@@ -5,6 +5,47 @@ import { parseOrThrow } from '../lib/errors.js';
 
 export const TIERS = ['router', 'fast', 'balanced', 'deep', 'background'];
 export const LEVELS = ['minimal', 'low', 'medium', 'high'];
+/** A work order opens by itself after `afterScans` consecutive scans (critical: at once) from `minSeverity` up. */
+export const DEFAULT_AUTO_WO = Object.freeze({ enabled: true, afterScans: 2, minSeverity: 'warning' });
+
+/** Female prebuilt Gemini voices (shared by Live native audio and TTS); `style` is Google's one-word label. */
+export const FEMALE_VOICES = Object.freeze([
+  { name: 'Kore', style: 'Firm' },
+  { name: 'Aoede', style: 'Breezy' },
+  { name: 'Zephyr', style: 'Bright' },
+  { name: 'Leda', style: 'Youthful' },
+  { name: 'Callirrhoe', style: 'Easy-going' },
+  { name: 'Autonoe', style: 'Bright' },
+  { name: 'Despina', style: 'Smooth' },
+  { name: 'Erinome', style: 'Clear' },
+  { name: 'Laomedeia', style: 'Upbeat' },
+  { name: 'Achernar', style: 'Soft' },
+  { name: 'Gacrux', style: 'Mature' },
+  { name: 'Pulcherrima', style: 'Forward' },
+  { name: 'Vindemiatrix', style: 'Gentle' },
+  { name: 'Sulafat', style: 'Warm' },
+]);
+
+/** `auto` = answer in the speaker's language; a code pins one language through the system instruction. */
+export const VOICE_LANGUAGES = Object.freeze([
+  { code: 'auto', label: 'Auto (match the speaker)', name: null },
+  { code: 'en-IN', label: 'English (India)', name: 'English' },
+  { code: 'hi-IN', label: 'हिन्दी · Hindi', name: 'Hindi' },
+  { code: 'mr-IN', label: 'मराठी · Marathi', name: 'Marathi' },
+  { code: 'gu-IN', label: 'ગુજરાતી · Gujarati', name: 'Gujarati' },
+  { code: 'ta-IN', label: 'தமிழ் · Tamil', name: 'Tamil' },
+  { code: 'te-IN', label: 'తెలుగు · Telugu', name: 'Telugu' },
+  { code: 'kn-IN', label: 'ಕನ್ನಡ · Kannada', name: 'Kannada' },
+  { code: 'ml-IN', label: 'മലയാളം · Malayalam', name: 'Malayalam' },
+  { code: 'bn-IN', label: 'বাংলা · Bengali', name: 'Bengali' },
+  { code: 'en-US', label: 'English (US)', name: 'English' },
+  { code: 'en-GB', label: 'English (UK)', name: 'English' },
+  { code: 'de-DE', label: 'Deutsch · German', name: 'German' },
+  { code: 'fr-FR', label: 'Français · French', name: 'French' },
+  { code: 'es-ES', label: 'Español · Spanish', name: 'Spanish' },
+  { code: 'ar-XA', label: 'العربية · Arabic', name: 'Arabic' },
+  { code: 'ja-JP', label: '日本語 · Japanese', name: 'Japanese' },
+]);
 
 export const DEFAULT_AI = Object.freeze({
   tiers: {
@@ -28,10 +69,20 @@ export const DEFAULT_AI = Object.freeze({
     quietIntervalMin: env.ANOMALY_QUIET_INTERVAL_MIN,
     alwaysAskAi: false,
     investigate: true,
+    autoWorkOrder: { ...DEFAULT_AUTO_WO },
   },
   costWatch: { enabled: true, intervalMin: env.COST_WATCH_INTERVAL_MIN },
   kpiInsightTtlMin: env.KPI_INSIGHT_TTL_MIN,
   briefingTtlHours: env.BRIEFING_TTL_HOURS,
+  voice: {
+    enabled: true,
+    model: env.GEMINI_MODEL_VOICE,
+    fallback: env.GEMINI_FALLBACK_VOICE,
+    voiceName: 'Kore',
+    languageCode: 'auto',
+    maxSessionMin: 10,
+    maxConcurrent: 3,
+  },
 });
 
 const modelId = z.string().regex(/^[a-z0-9.-]+$/, 'Model ids use lowercase letters, digits, dots and dashes');
@@ -62,6 +113,13 @@ export const aiPatchSchema = z.strictObject({
       quietIntervalMin: minutes(1440).optional(),
       alwaysAskAi: z.boolean().optional(),
       investigate: z.boolean().optional(),
+      autoWorkOrder: z
+        .strictObject({
+          enabled: z.boolean().optional(),
+          afterScans: z.number().int().min(1).max(10).optional(),
+          minSeverity: z.enum(['warning', 'critical']).optional(),
+        })
+        .optional(),
     })
     .optional(),
   costWatch: z
@@ -69,6 +127,17 @@ export const aiPatchSchema = z.strictObject({
     .optional(),
   kpiInsightTtlMin: minutes(1440).optional(),
   briefingTtlHours: z.number().int().min(1).max(168).optional(),
+  voice: z
+    .strictObject({
+      enabled: z.boolean().optional(),
+      model: modelId.optional(),
+      fallback: modelId.nullable().optional(),
+      voiceName: z.enum(FEMALE_VOICES.map((v) => v.name)).optional(),
+      languageCode: z.enum(VOICE_LANGUAGES.map((l) => l.code)).optional(),
+      maxSessionMin: z.number().int().min(1).max(30).optional(),
+      maxConcurrent: z.number().int().min(1).max(50).optional(),
+    })
+    .optional(),
 });
 
 const isPlain = (v) => v != null && typeof v === 'object' && !Array.isArray(v);

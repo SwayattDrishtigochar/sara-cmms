@@ -56,6 +56,16 @@ export const endOfDay = (date, timeZone) => fromLocal(Date.parse(`${date}T23:59:
 export const localDate = (t, timeZone) =>
   new Date(toMs(t) + zoneOffset(t, timeZone)).toISOString().slice(0, 10);
 
+/** `YYYY-MM-DDTHH:mm` of instant `t` in `timeZone` (for `<input type="datetime-local">`); '' without a value. */
+export const localDateTime = (t, timeZone) =>
+  t == null || t === '' ? '' : new Date(toMs(t) + zoneOffset(t, timeZone)).toISOString().slice(0, 16);
+
+/** Instant (ms) of a `YYYY-MM-DDTHH:mm` wall time in `timeZone`; null when the text is not a date. */
+export const fromLocalDateTime = (text, timeZone) => {
+  const local = Date.parse(`${text}:00Z`);
+  return Number.isNaN(local) ? null : fromLocal(local, timeZone);
+};
+
 // ── Scale & ticks ────────────────────────────────────────────────────────────
 
 /** Linear time ↔ pixel mapping of `range` onto `width` px. */

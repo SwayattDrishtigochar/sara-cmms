@@ -57,6 +57,8 @@ export const deviceView = (device, companyName) => ({
 
 ### `server/src/routes/adminSim.js` (package `devices`)
 
+> Moved to the simulator in phase 7: `/api/admin/sim` and this router no longer exist in SARA (`sara-simulator/src/ui/server.js`).
+
 `export const adminSimRouter` — mounted at `/api/admin/sim` behind `authenticate` + `requireSuperAdmin`.
 
 | Method & path | Body | Response |
@@ -186,7 +188,7 @@ is the prior state; build runs clipped to `[start, min(stop, now)]`; `availabili
 - Pages (package `ui-machines`): `client/src/machines/MachinesPage.jsx` (`/machines`),
   `client/src/machines/MachinePage.jsx` (`/machines/:id`), components in `client/src/machines/` and
   `client/src/ui/charts.jsx` (Sparkline, TelemetryChart, StatusTimelineBar).
-- Pages (package `ui-superadmin`): `client/src/superadmin/SuperAdminPage.jsx` (`/superadmin`, Tabs with
+- Pages (package `ui-superadmin`; the Simulation tab moved to the simulator in phase 7, SARA keeps AI + Platform): `client/src/superadmin/SuperAdminPage.jsx` (`/superadmin`, Tabs with
   `Simulation` now; leave a clearly marked spot for the `AI` tab added in phase 3) and
   `client/src/superadmin/SimulationTab.jsx` (+ small components in the same folder). Data via TanStack
   Query on `/api/admin/sim/*`, polling every 3 s while visible.

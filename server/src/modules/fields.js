@@ -83,7 +83,7 @@ const mongoosePath = (spec, modelOf) => {
   if (spec.index) path.index = true;
   if (spec.unique) path.unique = true;
   if (spec.lowercase) path.lowercase = true;
-  // Raw writers (the simulator) bypass zod, so the format is a schema rule too (validate-db checks it).
+  // Raw writers (the telemetry source) bypass zod, so the format is a schema rule too (validate-db checks it).
   if (spec.pattern && spec.type === 'string') path.match = [new RegExp(spec.pattern), spec.patternMessage];
   if (spec.min !== undefined && spec.type === 'number') path.min = spec.min;
   if (spec.max !== undefined && spec.type === 'number') path.max = spec.max;

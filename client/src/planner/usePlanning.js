@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client.js';
+import { useRecords } from '../modules/useModules.js';
 
 const refresh = (qc) =>
   Promise.all([
@@ -14,7 +15,7 @@ export const useCalendar = (params) =>
     queryFn: ({ signal }) => api('/planning/calendar', { query: params, signal }),
   });
 
-/** Plan proposals, newest first (`{ items }`). */
+/** Plan proposals, newest first (`{ items }`); `kind` may be a comma list. */
 export const useProposals = (params) =>
   useQuery({
     queryKey: ['m', 'planproposals', 'list', params],
@@ -37,6 +38,20 @@ export const useParts = () =>
     staleTime: 5 * 60_000,
   });
 
+/** `{ people }` of a department free or busy in `{ from, to }` (ISO); `skills` comma list, `plantId`. */
+export const usePeople = (params) =>
+  useQuery({
+    queryKey: ['planning', 'people', params],
+    queryFn: ({ signal }) => api('/planning/people', { query: params, signal }),
+    staleTime: 30_000,
+    enabled: Boolean(params?.from && params?.to),
+  });
+
+/** Latest production plan records. */
+export const useProductionPlans = () => useRecords('productionplans', { limit: 20, sort: '-createdAt' });
+/** Latest maintenance plan records. */
+export const useMaintenancePlans = () => useRecords('maintenanceplans', { limit: 20, sort: '-createdAt' });
+
 const usePlanMutation = (fn, onSuccess) => {
   const qc = useQueryClient();
   return useMutation({
@@ -56,20 +71,35 @@ const keep = (id) => (qc, r) =>
     (old) => old && { ...old, proposal: { ...old.proposal, ...r.proposal } },
   );
 
-/** `{ partName, quantity, dueDate, … }` → `{ proposal, plan }` (a draft; nothing is booked yet). */
+/** `{ partName, quantity, dueDate, … }` → `{ proposal, plan, check }` (a draft; nothing is booked yet). */
 export const useProposeProduction = () =>
   usePlanMutation((body) => api('/planning/production', { method: 'POST', body }));
 
-/** `{ assetId?, anomalyId?, workOrderId?, horizonDays?, allowNonRunningDays? }` → `{ proposal, plan }`. */
+/** `EditedProductionPlan` → `CheckResult` (with `proposalId` the proposal is rewritten too). */
+export const useCheckProduction = () =>
+  usePlanMutation((body) => api('/planning/production/check', { method: 'POST', body }));
+
+/** `{ assetId?, anomalyId?, workOrderId?, horizonDays?, allowNonRunningDays? }` → `{ proposal, plan }` (one task). */
 export const useProposeMaintenance = () =>
   usePlanMutation((body) => api('/planning/maintenance', { method: 'POST', body }));
 
-/** Books a proposal (`{ option? }`) → `{ proposal, created, updated }`; 409 PLAN_CHANGED carries the new plan. */
+/** `{ scope, assetIds?, horizonDays?, objective?, … }` → `{ proposal, plan, check }` (a whole maintenance plan). */
+export const useProposeMaintenancePlan = () =>
+  usePlanMutation((body) => api('/planning/maintenance/plan', { method: 'POST', body }));
+
+/** `EditedMaintenancePlan` → `CheckResult` with `tasks`, `metrics`, `impactDelta`. */
+export const useCheckMaintenance = () =>
+  usePlanMutation((body) => api('/planning/maintenance/check', { method: 'POST', body }));
+
+/** Books a proposal (`{ option?, force? }`) → `{ proposal, created, updated }`; 409 PLAN_CHANGED carries the new plan. */
 export const useApplyProposal = (id) => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ option } = {}) =>
-      api(`/planning/proposals/${id}/apply`, { method: 'POST', body: option ? { option } : {} }),
+    mutationFn: ({ option, force } = {}) =>
+      api(`/planning/proposals/${id}/apply`, {
+        method: 'POST',
+        body: { ...(option ? { option } : {}), ...(force ? { force: true } : {}) },
+      }),
     onSuccess: (r) => keep(id)(qc, r),
     onSettled: () => refresh(qc), // a 409 also changed the proposal (stale) and made a new one
   });
@@ -80,4 +110,7 @@ export const useDiscardProposal = (id) =>
 
 /** Asks the AI to explain the proposal again → `{ explanation }`. */
 export const useExplainProposal = (id) =>
-  usePlanMutation(() => api(`/planning/proposals/${id}/explain`, { method: 'POST', body: {} }));
+  usePlanMutation(
+    () => api(`/planning/proposals/${id}/explain`, { method: 'POST', body: {} }),
+    (qc, r) => keep(id)(qc, { proposal: { explanation: r?.explanation } }),
+  );

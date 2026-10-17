@@ -1,7 +1,7 @@
 import { flux, fluxDuration, fluxExpression } from '@influxdata/influxdb-client';
 import { bucketFor, influxEnabled, queryRows } from '../../config/influx.js';
 import { Baseline } from '../../db/models/Baseline.js';
-import { ParameterSpec } from '../../db/models/Sim.js';
+import { ParameterSpec } from '../../db/models/ParameterSpec.js';
 import { ENERGY_FIELDS, RUNNING_STATES } from '../../telemetry/catalog.js';
 
 /**
@@ -171,7 +171,7 @@ export const ensureBaselines = async (companyId, { maxAgeMs = BASELINE_MAX_AGE_M
 export const clearBaselineCache = (companyId) =>
   companyId === undefined ? cache.clear() : cache.delete(String(companyId));
 
-/** Spec bands per asset type keyed by `${assetType}|${field}` (the simulator or an OEM manual writes them). */
+/** Spec bands per asset type keyed by `${assetType}|${field}` (the telemetry source or an OEM manual writes them). */
 export const loadSpecs = async () => {
   const specs = await ParameterSpec.find({ valueType: { $ne: 'string' } }).lean();
   return new Map(specs.map((s) => [`${s.assetType}|${s.field}`, s]));
@@ -207,7 +207,7 @@ export const UNIT_FLOOR = {
 };
 
 /**
- * The smallest spread a baseline may claim, so z counts real noise, not a near-flat simulated history
+ * The smallest spread a baseline may claim, so z counts real noise, not a near-flat recorded history
  * (which turned a 2.5 °C wobble into 17σ): SPEC_FLOOR of the spec band's sigma when the type has a band
  * (its scale beats a share of the level, which means nothing for 620 °C), else REL_FLOOR of |mean|,
  * and never less than the unit's floor.

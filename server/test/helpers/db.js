@@ -1,8 +1,8 @@
 import mongoose from 'mongoose';
 import { connectMongo } from '../../src/config/mongo.js';
 import { systemContext } from '../../src/context/buildUserContext.js';
-import { generateAccount } from '../../src/sim/accountGenerator.js';
-import { ensureIndexes, ensurePlatform } from '../../src/sim/platform.js';
+import { ensureIndexes, ensurePlatform } from '../../src/platform/platform.js';
+import { seedCompany } from './fixtures.js';
 
 export const PASSWORD = 'Test@12345';
 export const NOW = new Date('2026-10-15T06:30:00.000Z'); // 12:00 IST, a Thursday
@@ -13,7 +13,7 @@ export const setupDatabase = async () => {
   await mongoose.connection.dropDatabase();
   await ensureIndexes();
   await ensurePlatform();
-  const acme = await generateAccount({
+  const acme = await seedCompany({
     name: 'Acme Components',
     slug: 'acme',
     domain: 'acme.test',
@@ -21,7 +21,7 @@ export const setupDatabase = async () => {
     withHistory: true,
     now: NOW,
   });
-  const beta = await generateAccount({
+  const beta = await seedCompany({
     name: 'Beta Foods',
     slug: 'betafoods',
     domain: 'beta.test',

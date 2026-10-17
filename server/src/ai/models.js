@@ -80,3 +80,43 @@ export const listModels = async () => {
   cached = { at: Date.now(), ttl, models };
   return models;
 };
+
+/** Gemini Live (native audio) model ids known without the API (unverified, phase 8 §0.2). */
+export const KNOWN_LIVE_MODELS = [
+  'gemini-3.1-flash-live-preview',
+  'gemini-2.5-flash-native-audio-preview-12-2025',
+  'gemini-2.5-flash-native-audio-preview-09-2025',
+];
+
+let liveCached = { at: 0, ttl: 0, models: null };
+
+const knownLiveModels = async () => {
+  const { voice } = await getAiSettings();
+  const ids = new Set([...KNOWN_LIVE_MODELS, voice?.model, voice?.fallback].filter(Boolean));
+  return [...ids].map((id) => ({ id, displayName: id }));
+};
+
+/** Models that serve Live (`bidiGenerateContent`): the API's first page, cached 10 min; the built-in list in mock mode or on failure. */
+export const listLiveModels = async () => {
+  if (liveCached.models && Date.now() - liveCached.at < liveCached.ttl) return liveCached.models;
+  let models;
+  let ttl = TTL_MS;
+  try {
+    if (isMock()) models = await knownLiveModels();
+    else {
+      const pager = await getClient().models.list({ config: { pageSize: 1000 } });
+      models = (pager.page ?? [])
+        .filter((m) => m.supportedActions?.includes('bidiGenerateContent'))
+        .map((m) => {
+          const id = String(m.name).replace(/^models\//, '');
+          return { id, displayName: m.displayName ?? id };
+        });
+    }
+  } catch (err) {
+    logger.warn({ err: err.message }, 'listing Gemini Live models failed, using the built-in list');
+    models = await knownLiveModels();
+    ttl = 60_000;
+  }
+  liveCached = { at: Date.now(), ttl, models };
+  return models;
+};

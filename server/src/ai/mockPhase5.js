@@ -251,10 +251,118 @@ const briefing = ({ company = {}, scope = {}, evidence = {} } = {}) => {
   };
 };
 
+const VERDICT_WORD = { doable: 'Doable', adjust: 'Needs adjustment', not_doable: 'Not doable' };
+const hours = (h) => `${num(Math.abs(h ?? 0), Math.abs(h ?? 0) < 10 ? 1 : 0)} h`;
+
+/** Phase 7: the production plan (as proposed, or as the user edited it) in words: doable or not, and what to change. */
+const planFeasibility = ({ plan: p = {} } = {}) => {
+  const cards = p.jobCards ?? [];
+  const issues = p.issues ?? [];
+  const adjustments = p.adjustments ?? [];
+  const critical = issues.filter((i) => i.severity === 'critical');
+  const verdict = VERDICT_WORD[p.verdict] ?? VERDICT_WORD.doable;
+  const machines = [...new Set(cards.map((c) => c.asset).filter(Boolean))];
+  const operators = cards.flatMap((c) => c.operators ?? []);
+  const unmanned = cards.filter((c) => !(c.operators ?? []).length).length;
+  const what = `${(p.quantity ?? 0).toLocaleString('en-IN')} × ${p.partName ?? 'the part'}`;
+  const summary =
+    p.verdict === 'not_doable'
+      ? `${verdict}: ${what} cannot be finished by the due date as planned${p.shortfall ? ` (${num(p.shortfall)} pcs short)` : ''}; ${critical[0]?.text ?? issues[0]?.text ?? 'the schedule conflicts with existing bookings'}.`
+      : p.verdict === 'adjust'
+        ? `${verdict}: ${what} can run on ${machines.join(', ') || 'the chosen machines'}, but ${issues[0]?.text ?? 'one step needs a change'}${adjustments[0] ? `; ${adjustments[0].label.replace(/^[A-Z](?=[a-z])/, (c) => c.toLowerCase())}` : ''}.`
+        : `${verdict}: ${what} fits on ${machines.join(', ') || 'the chosen machines'} with ${operators.length} operator shift${operators.length === 1 ? '' : 's'} assigned, finishing ${hours(p.slackHours)} before the due date.`;
+  const bullets = [
+    ...cards.slice(0, 3).map((c) => {
+      const crew = (c.operators ?? []).slice(0, 3).join(', ');
+      return `${c.asset}: ${(c.target ?? 0).toLocaleString('en-IN')} pcs with ${c.tool}${c.setupMin ? ` after a ${c.setupMin} min changeover` : ''}${crew ? ` · ${crew}` : ' · no operator yet'}`;
+    }),
+    ...issues
+      .filter((i) => i !== issues[0] || p.verdict === 'doable')
+      .slice(0, 1)
+      .map((i) => i.text),
+    ...(p.risks ?? []).slice(0, 1),
+  ].slice(0, 4);
+  const adjust = [
+    ...adjustments.slice(0, 2).map((a) => a.label),
+    ...(unmanned
+      ? [`Assign an operator to ${unmanned} job card${unmanned === 1 ? '' : 's'} before the shift starts`]
+      : []),
+  ].slice(0, 3);
+  return {
+    summary: summary.slice(0, 400),
+    bullets: bullets.length ? bullets : ['No machine changes are needed'],
+    adjust,
+  };
+};
+
+/** Phase 7: the maintenance plan in words: production impact, cost avoided, who does what, what to watch. */
+const maintenancePlanSummary = ({ plan: p = {} } = {}) => {
+  const m = p.metrics ?? {};
+  const tasks = p.tasks ?? [];
+  const symbol = p.currency?.symbol ?? '₹';
+  const issues = p.issues ?? [];
+  const verdict = VERDICT_WORD[p.verdict] ?? VERDICT_WORD.doable;
+  const zero = m.zeroImpactTasks ?? tasks.filter((t) => t.zeroImpact).length;
+  const total = m.tasks ?? tasks.length;
+  const scope =
+    p.scope === 'assets' && p.assetNames?.length
+      ? p.assetNames.slice(0, 3).join(', ') +
+        (p.assetNames.length > 3 ? ` and ${p.assetNames.length - 3} more` : '')
+      : 'the whole plant';
+  const lost = num(m.productionHoursLost, 1) ?? 0;
+  const saved = m.downtimeCostAvoided ?? 0;
+  const unassigned = tasks.filter((t) => !t.technician).length;
+  const summary =
+    p.verdict === 'not_doable'
+      ? `${verdict}: ${issues[0]?.text ?? 'a task cannot be done as placed'}; change the window or the technician before creating the plan.`
+      : `${verdict}: ${total} task${total === 1 ? '' : 's'} on ${scope}, ${zero} in free windows with no production impact${
+          lost ? `, ${hours(lost)} of production moved` : ''
+        }${saved > 0 ? `, about ${money(saved, symbol)} of downtime cost avoided against doing everything at once` : ''}${
+          p.verdict === 'adjust' && issues[0] ? `; ${issues[0].text}` : ''
+        }.`;
+  const bullets = [
+    ...tasks
+      .slice(0, 3)
+      .map(
+        (t) =>
+          `${t.asset}: ${t.title}${t.technician ? ` with ${t.technician}` : ' (nobody free yet)'}${
+            t.zeroImpact
+              ? ', no production impact'
+              : t.impactHours
+                ? `, ${hours(t.impactHours)} of production pushed`
+                : ''
+          }${t.late ? ', after its deadline' : ''}`,
+      ),
+    ...(tasks.length > 3
+      ? [`${tasks.length - 3} more task${tasks.length - 3 === 1 ? '' : 's'} follow the same rule`]
+      : []),
+  ].slice(0, 4);
+  const watch = [
+    ...(unassigned
+      ? [
+          `${unassigned} task${unassigned === 1 ? '' : 's'} still need${unassigned === 1 ? 's' : ''} a technician on shift`,
+        ]
+      : []),
+    ...tasks
+      .filter((t) => t.late)
+      .slice(0, 1)
+      .map((t) => `${t.title} runs after its deadline; move it earlier if the machine can stop`),
+    ...(p.objective === 'fix_fast' ? ['Fix-fast objective: windows are early, so some job cards shift'] : []),
+    'Re-check the plan if a job card moves before these windows',
+  ].slice(0, 3);
+  return {
+    summary: summary.slice(0, 400),
+    bullets: bullets.length ? bullets : ['Nothing is due in this horizon'],
+    watch,
+  };
+};
+
 /** `mockInput.kind` → builder; mock.js uses these before its per-purpose builders. */
 export const PHASE5_BUILDERS = {
   plan_explanation: planExplanation,
   maintenance_recommendation: maintenanceRecommendation,
+  plan_feasibility: planFeasibility,
+  maintenance_plan_summary: maintenancePlanSummary,
   cost_overview: costOverview,
   cost_alert: costAlert,
   kpi_insights: kpiInsight,

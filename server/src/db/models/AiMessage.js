@@ -31,6 +31,7 @@ const messageSchema = new mongoose.Schema(
     },
     latencyMs: Number,
     status: { type: String, enum: MESSAGE_STATUSES, default: 'complete' },
+    channel: { type: String, enum: ['text', 'voice'], default: 'text' },
     // { id, tool, args, callId, callIndex, siblingResponses: [Part], preview, status, expiresAt, result }
     pendingAction: { type: Mixed, default: null },
   },

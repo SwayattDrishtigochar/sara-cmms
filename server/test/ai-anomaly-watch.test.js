@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { attachDetections } from '../src/ai/anomaly/scoring.js';
+import { recentScans } from '../src/ai/anomaly/scanLog.js';
 import {
   CLEAN_SCANS_TO_RESOLVE,
   markDue,
@@ -162,9 +162,24 @@ describe('effects of a scan', () => {
       created: 1,
       notified: 1,
       skipped: 0,
+      flagged: 1,
+      dropped: 0,
       model: 'mock-model',
       mock: true,
+      summary: 'Reviewed 1 of 1 machine, 1 flagged by the screens. 1 new anomaly.',
     });
+    // The scan is readable back: flagged rows, the model's decision and nothing dropped.
+    const [log] = await recentScans(1);
+    expect(log).toMatchObject({
+      companyId: String(acme.companyId),
+      reason: 'manual',
+      model: 'mock-model (mock)',
+      reviewed: [String(imm._id)],
+      flagged: [{ assetId: String(imm._id), name: 'IMM 1', flags: ['z', 'band', 'spikes'] }],
+      decisions: [{ assetId: String(imm._id), state: 'anomalous' }],
+      dropped: [],
+    });
+    expect(log.flagged[0].rows[0]).toMatch(/^vibration \| vibration \(mm\/s\) \| 4\.1 \| 3\.9 \|/);
     expect(generate).toHaveBeenCalledTimes(1);
     const call = generate.mock.calls[0][0];
     expect(call).toMatchObject({ tier: 'background', purpose: 'anomaly', companyId: String(acme.companyId) });
@@ -614,45 +629,5 @@ describe('startAnomalyWatch', () => {
       spy.mockRestore();
     }
     expect(generate).not.toHaveBeenCalled();
-  });
-});
-
-describe('ground truth scoring', () => {
-  it('matches the first anomaly after an injection whose parameters touch the affected fields', async () => {
-    await Model('anomalies').deleteMany({ companyId: acme.companyId });
-    computeFeatures.mockResolvedValue([feature(imm)]);
-    answer([decision(imm)]);
-    await scanCompany(acme.companyId, { force: true });
-    const [anomaly] = await anomalies();
-    const startedAt = new Date(anomaly.detectedAt.getTime() - 5 * MIN);
-    const endsAt = new Date(startedAt.getTime() + HOUR);
-    const base = { companyId: acme.companyId, assetId: imm._id, startedAt, endsAt, clearedAt: null };
-    const [hit, otherField, tooLate, otherAsset, anyField] = await attachDetections([
-      { ...base, scenario: 'bearing_wear', affects: ['vibration', 'motorCurrent', 'oilTempPv'] },
-      { ...base, scenario: 'overheating', affects: ['zoneTemp1'] },
-      { ...base, startedAt: new Date(anomaly.detectedAt.getTime() + MIN) },
-      { ...base, assetId: press._id, affects: ['vibration'] },
-      { ...base, affects: [], field: undefined },
-    ]);
-    expect(hit.detection).toEqual({
-      anomalyId: String(anomaly._id),
-      code: anomaly.anomalyCode,
-      detectedAt: anomaly.detectedAt,
-      latencySec: 300,
-      matchedFields: ['vibration'],
-    });
-    expect(otherField.detection).toBeNull();
-    expect(tooLate.detection).toBeNull();
-    expect(otherAsset.detection).toBeNull();
-    expect(anyField.detection?.matchedFields).toEqual(['vibration']);
-    expect(await attachDetections([])).toEqual([]);
-
-    // A quality finding cites the derived rejectionRate; tool wear names rejectedCount.
-    await Model('anomalies').updateOne(
-      { _id: anomaly._id },
-      { $set: { parameters: [{ field: 'rejectionRate', observed: 9, expected: 2.7 }] } },
-    );
-    const [wear] = await attachDetections([{ ...base, affects: ['rejectedCount', 'cycleTime'] }]);
-    expect(wear.detection?.matchedFields).toEqual(['rejectionRate']);
   });
 });

@@ -2,18 +2,50 @@ import { DateTime } from 'luxon';
 import { z } from 'zod';
 import { findByIdOrCode, fmtDate, round, zoneOf } from '../agent/tools/common.js';
 import { resolveTimeRange } from '../agent/tools/resolve.js';
-import { badRequest } from '../lib/errors.js';
+import { AppError, badRequest } from '../lib/errors.js';
 import { OBJECT_ID_PATTERN } from '../modules/fields.js';
+import { can } from '../modules/permissions.js';
 import { getModule } from '../modules/registry.js';
 import { buildCalendar, calendarToGantt, hoursOf } from './capacity.js';
 import { canPlanProduction, proposeProduction } from './production.js';
-import { applyProposal, checkApply, planBlockFor } from './proposals.js';
+import { checkProductionPlan, editedFromProposal } from './productionCheck.js';
+import { applyProposal, checkApply, getProposal, planBlockFor } from './proposals.js';
 
-/** Planning tools (phase 5 §5, group planning): capacity, production planning and applying a plan. */
+/** Planning tools (phase 5 §5, phase 7 §5, group planning): capacity, plans, checking an edit, applying. */
 
 const DAY = 86_400_000;
 const id = () => z.string().regex(OBJECT_ID_PATTERN, 'must be a record id');
 const at = (ctx, d) => fmtDate(ctx, d, { time: true });
+const VERDICT_TEXT = { doable: 'doable', adjust: 'needs adjustment', not_doable: 'not doable' };
+const verdictText = (verdict) => VERDICT_TEXT[verdict] ?? 'doable';
+
+/** Job cards for the model: machine, mould, window, operators by name. */
+const cardsForModel = (ctx, jobCards) =>
+  jobCards.map((j) => ({
+    key: j.key,
+    asset: j.asset,
+    tool: j.tool,
+    target: j.target,
+    start: at(ctx, j.start),
+    end: at(ctx, j.end),
+    setupMin: j.setupMin,
+    operators: [...new Set((j.operators ?? []).map((o) => o.name).filter(Boolean))],
+  }));
+const nextStep = (verdict) =>
+  verdict === 'not_doable'
+    ? 'Apply an adjustment: check_plan { proposalId, edits: { adjustmentIds: ["adj-1"] } }'
+    : 'Call apply_plan { proposalId } so the user can confirm';
+
+/** The stored adjustments' patches (by id) as edits rows: job cards or tasks merged by key, plan fields as is. */
+const adjustmentEdits = (proposal, ids = []) =>
+  ids.map((adjId) => {
+    const adj = (proposal.adjustments ?? []).find((a) => a.id === adjId);
+    if (!adj)
+      throw badRequest(
+        `${proposal.proposalCode} has no adjustment ${adjId}; check the plan again for the current ones`,
+      );
+    return adj.patch ?? {};
+  });
 
 const toDate = (value, what) => {
   const d = new Date(/^\d+$/.test(String(value)) ? Number(value) : value);
@@ -22,8 +54,22 @@ const toDate = (value, what) => {
 };
 
 /** ISO date → end of that day in the company zone; full ISO → as is; text → resolveTimeRange's stop. */
-export const dueDateOf = (ctx, text) => {
+const WEEKDAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+
+export const dueDateOf = (ctx, text, now = DateTime.now()) => {
   const s = String(text).trim();
+  // "Friday" / "this Friday" = the coming one (today counts); "next Friday" = the first one after today;
+  // "in 9 days" = that day. Everything else goes to the time-range resolver.
+  const day = /^(?:(this|next|coming)\s+)?(mon|tue|wed|thu|fri|sat|sun)[a-z]*$/i.exec(s);
+  const inDays = /^in\s+(\d{1,3})\s+days?$/i.exec(s);
+  if (day || inDays) {
+    const today = now.setZone(zoneOf(ctx)).startOf('day');
+    const ahead = inDays
+      ? Number(inDays[1])
+      : (WEEKDAYS.findIndex((w) => w.startsWith(day[2].toLowerCase())) + 1 - today.weekday + 7) % 7 ||
+        (day[1]?.toLowerCase() === 'next' ? 7 : 0);
+    return today.plus({ days: ahead }).endOf('day').set({ millisecond: 0 }).toJSDate();
+  }
   // A day means its last second (23:59:59 local), as the Planner's date input sends it, so titles
   // read "by 25-10-2026" rather than the exclusive 26-10 00:00.
   if (/^\d{4}-\d{2}-\d{2}$/.test(s))
@@ -120,30 +166,163 @@ export const planningTools = [
       });
       const f = proposal.feasibility;
       const jobCards = proposal.diff?.jobCards ?? [];
+      const verdict = f.verdict ?? 'doable';
       return {
         forModel: {
           proposalId: String(proposal._id),
           code: proposal.proposalCode,
+          verdict,
           feasible: f.feasible,
           dueDate: at(ctx, f.dueDate),
           projectedFinish: at(ctx, f.projectedFinish),
           slackHours: f.slackHours,
           shortfall: f.shortfall,
-          jobCards: jobCards.map((j) => ({
-            asset: j.asset,
-            tool: j.tool,
-            target: j.target,
-            start: at(ctx, j.start),
-            end: at(ctx, j.end),
-            setupMin: j.setupMin,
-          })),
+          jobCards: cardsForModel(ctx, jobCards),
+          issues: (proposal.issues ?? []).map((i) => i.text),
+          adjustments: (proposal.adjustments ?? []).map(({ id, label }) => ({ id, label })),
           risks: (proposal.risks ?? []).map((r) => r.text),
           alternatives: (proposal.alternatives ?? []).map((a) => a.text),
-          next: 'Call apply_plan { proposalId } so the user can confirm',
+          next: nextStep(verdict),
         },
-        summary: `${proposal.proposalCode} · ${jobCards.length} job card${jobCards.length === 1 ? '' : 's'} · ${slack(f)}`,
+        summary: `${proposal.proposalCode} · ${jobCards.length} job card${jobCards.length === 1 ? '' : 's'} · ${
+          verdict === 'doable' ? `doable (${slack(f)})` : verdictText(verdict)
+        }`,
         rowCount: jobCards.length,
         blocks: [{ type: 'plan', payload: await planBlockFor(ctx, proposal) }],
+      };
+    },
+  },
+  {
+    name: 'check_plan',
+    group: 'planning',
+    permission: (ctx) =>
+      can(ctx, getModule('jobcards'), 'update') || can(ctx, getModule('workorders'), 'update'),
+    description:
+      'Checks a draft plan after the user edits it (another machine, start/end, quantity, due date, operators or technicians) and says whether it is doable, what conflicts and which adjustment fixes it. Keys are the plan’s job card (op-n) or task (t-n) keys. To take a suggested adjustment, pass its id in adjustmentIds (applied before the other edits). Example: { proposalId: "PLN-3", edits: { jobCards: [{ key: "op-2", assetId: "<IMM 5 id>" }] } } or { proposalId: "PLN-3", edits: { adjustmentIds: ["adj-1"] } }.',
+    schema: z.object({
+      proposalId: z.string().min(1).max(60),
+      edits: z.object({
+        adjustmentIds: z.array(z.string().max(20)).max(5).optional(),
+        dueDate: z.string().max(40).optional(),
+        quantity: z.int().min(1).max(10_000_000).optional(),
+        jobCards: z
+          .array(
+            z.object({
+              key: z.string().min(1).max(20),
+              assetId: id().optional(),
+              start: z.string().max(40).optional(),
+              end: z.string().max(40).optional(),
+              target: z.int().min(1).max(10_000_000).optional(),
+              operatorIds: z.array(id()).max(6).optional(),
+            }),
+          )
+          .max(10)
+          .optional(),
+        tasks: z
+          .array(
+            z.object({
+              key: z.string().min(1).max(20),
+              start: z.string().max(40).optional(),
+              end: z.string().max(40).optional(),
+              technicianId: id().nullable().optional(),
+            }),
+          )
+          .max(20)
+          .optional(),
+      }),
+    }),
+    run: async (ctx, { proposalId, edits }) => {
+      const proposal = await getProposal(ctx, proposalId);
+      const code = proposal.proposalCode;
+      // A check without edits repeats the plan block the plan tool already showed: no second block.
+      const changed = Object.values(edits ?? {}).some((v) => (Array.isArray(v) ? v.length > 0 : v != null));
+      const planBlocks = (payload) => (changed ? [{ type: 'plan', payload }] : []);
+      if (proposal.kind === 'maintenance_plan') {
+        if (!can(ctx, getModule('workorders'), 'update'))
+          throw badRequest('Your role cannot change maintenance plans');
+        const { checkMaintenancePlan } = await import('./maintenancePlanCheck.js');
+        const tasks = (proposal.diff?.tasks ?? []).map((t) => ({
+          key: t.key,
+          start: toDate(t.start, 'start').toISOString(),
+          end: toDate(t.end, 'end').toISOString(),
+          technicianId: t.technician?.userId ?? null,
+        }));
+        const taskEdits = [
+          ...adjustmentEdits(proposal, edits.adjustmentIds).flatMap((patch) => patch.tasks ?? []),
+          ...(edits.tasks ?? []),
+        ];
+        for (const e of taskEdits) {
+          const row = tasks.find((t) => t.key === e.key);
+          if (!row) throw badRequest(`${code} has no task ${e.key}`);
+          if (e.start) row.start = toDate(e.start, 'start').toISOString();
+          if (e.end) row.end = toDate(e.end, 'end').toISOString();
+          if (e.technicianId !== undefined) row.technicianId = e.technicianId;
+        }
+        const check = await checkMaintenancePlan(ctx, { proposalId: String(proposal._id), tasks });
+        return {
+          forModel: {
+            proposalId: String(proposal._id),
+            code,
+            verdict: check.verdict,
+            issues: check.issues.map((i) => i.text),
+            adjustments: check.adjustments.map(({ id, kind, label }) => ({ id, kind, label })),
+            tasks: (check.tasks ?? []).slice(0, 20).map((t) => ({
+              key: t.key,
+              title: t.title,
+              asset: t.asset,
+              start: at(ctx, t.start),
+              end: at(ctx, t.end),
+              technician: t.technician?.name ?? null,
+              impactHours: t.impactHours,
+              zeroImpact: t.zeroImpact,
+              late: t.late,
+            })),
+            next: nextStep(check.verdict),
+          },
+          summary: `${code} · ${verdictText(check.verdict)} · ${check.issues.length} issue${check.issues.length === 1 ? '' : 's'}`,
+          rowCount: check.tasks?.length ?? 0,
+          blocks: planBlocks(check.plan),
+        };
+      }
+      if (proposal.kind !== 'production')
+        throw badRequest(`${code} is a single maintenance task; plan it again`);
+      if (!can(ctx, getModule('jobcards'), 'update'))
+        throw badRequest('Your role cannot change production plans');
+      const edited = editedFromProposal(proposal);
+      for (const patch of adjustmentEdits(proposal, edits.adjustmentIds)) {
+        if (patch.dueDate) edited.dueDate = toDate(patch.dueDate, 'dueDate').toISOString();
+        if (patch.quantity) edited.quantity = patch.quantity;
+        for (const { key, ...fields } of patch.jobCards ?? []) {
+          const row = edited.jobCards.find((c) => c.key === key);
+          if (!row) throw badRequest(`${code} has no job card ${key}`);
+          for (const [field, value] of Object.entries(fields)) if (value !== undefined) row[field] = value;
+        }
+      }
+      if (edits.dueDate) edited.dueDate = dueDateOf(ctx, edits.dueDate).toISOString();
+      if (edits.quantity) edited.quantity = edits.quantity;
+      for (const e of edits.jobCards ?? []) {
+        const row = edited.jobCards.find((c) => c.key === e.key);
+        if (!row) throw badRequest(`${code} has no job card ${e.key}`);
+        if (e.assetId) row.assetId = e.assetId;
+        if (e.start) row.start = toDate(e.start, 'start').toISOString();
+        if (e.end) row.end = toDate(e.end, 'end').toISOString();
+        if (e.target) row.target = e.target;
+        if (e.operatorIds) row.operators = e.operatorIds.map((userId) => ({ userId }));
+      }
+      const check = await checkProductionPlan(ctx, edited);
+      return {
+        forModel: {
+          proposalId: String(proposal._id),
+          code,
+          verdict: check.verdict,
+          issues: check.issues.map((i) => i.text),
+          adjustments: check.adjustments.map(({ id, kind, label }) => ({ id, kind, label })),
+          jobCards: cardsForModel(ctx, check.jobCards),
+          next: nextStep(check.verdict),
+        },
+        summary: `${code} · ${verdictText(check.verdict)} · ${check.issues.length} issue${check.issues.length === 1 ? '' : 's'}`,
+        rowCount: check.jobCards.length,
+        blocks: planBlocks(check.plan),
       };
     },
   },
@@ -153,21 +332,34 @@ export const planningTools = [
     requiresConfirmation: true,
     permission: (ctx) => ctx.role !== 'view',
     description:
-      'Applies a draft plan from plan_production or plan_maintenance (creates/updates the job cards, work orders and production plan). The user sees the plan and must confirm. If the schedule changed, the error carries the new plan’s proposalId: offer that one. Example: { proposalId: "PLN-3" } or, for maintenance, { proposalId: "PLN-4", option: "move" }.',
+      'Applies a draft plan from plan_production or plan_maintenance (creates/updates the job cards, work orders and production plan). The user sees the plan and must confirm. If the schedule changed, the error carries the new plan’s proposalId: offer that one. If the plan is not doable, fix it with check_plan first, or pass force: true only when the user explicitly wants it anyway. Example: { proposalId: "PLN-3" } or, for maintenance, { proposalId: "PLN-4", option: "move" }.',
     schema: z.object({
       proposalId: z.string().min(1).max(60),
       option: z.enum(['zero_impact', 'insert', 'move', 'defer']).optional(),
+      force: z.boolean().optional(),
     }),
-    preview: async (ctx, { proposalId, option }) => {
+    preview: async (ctx, { proposalId, option, force }) => {
       const checked = await checkApply(ctx, proposalId, { option });
       if (checked.applied) throw badRequest(`${checked.proposal.proposalCode} is already applied`);
       const { proposal: p, ops } = checked;
+      // No confirm card for an apply that would fail: the same 409 apply gives, before the user confirms.
+      if (p.feasibility?.verdict === 'not_doable' && !force)
+        throw new AppError(
+          409,
+          'PLAN_NOT_DOABLE',
+          `${p.proposalCode} is not doable: fix it with check_plan (adjustmentIds), or pass force: true only if the user wants it anyway`,
+          { verdict: p.feasibility.verdict },
+        );
       const cards = ops.filter((o) => o.module === 'jobcards' && o.op === 'create');
       const names = [...new Set((p.diff?.jobCards ?? []).map((j) => j.asset))];
+      const wos = ops.filter((o) => o.module === 'workorders');
+      const techs = new Set(wos.flatMap((o) => o.data?.people ?? []));
       const label =
         p.kind === 'production' && cards.length
           ? `Apply ${p.proposalCode}: ${cards.length} job card${cards.length === 1 ? '' : 's'} on ${names.join(', ')}`
-          : `Apply ${p.proposalCode}: ${p.title}`;
+          : p.kind === 'maintenance_plan'
+            ? `Apply ${p.proposalCode}: ${wos.length} work order${wos.length === 1 ? '' : 's'}, ${techs.size} technician${techs.size === 1 ? '' : 's'}`
+            : `Apply ${p.proposalCode}: ${p.title}`;
       return {
         type: 'confirm',
         payload: {
@@ -195,8 +387,12 @@ export const planningTools = [
         },
       };
     },
-    run: async (ctx, { proposalId, option }) => {
-      const { proposal, created = [], updated = [] } = await applyProposal(ctx, proposalId, { option });
+    run: async (ctx, { proposalId, option, force }) => {
+      const {
+        proposal,
+        created = [],
+        updated = [],
+      } = await applyProposal(ctx, proposalId, { option, force });
       return {
         forModel: { applied: true, code: proposal.proposalCode, created, updated },
         summary: `Applied ${proposal.proposalCode}: ${created.length} created, ${updated.length} updated`,

@@ -28,7 +28,8 @@ export const limitsFor = (model, limits = {}) => ({ ...DEFAULT_LIMITS, ...(limit
 export const normalizeUsage = (u = {}) => {
   const prompt = u.promptTokenCount ?? u.prompt ?? 0;
   const thoughts = u.thoughtsTokenCount ?? u.thoughts ?? 0;
-  const candidates = u.candidatesTokenCount ?? u.candidates ?? 0;
+  // Live usageMetadata names the output tokens responseTokenCount.
+  const candidates = u.candidatesTokenCount ?? u.responseTokenCount ?? u.candidates ?? 0;
   return {
     prompt,
     thoughts,
@@ -99,6 +100,7 @@ export const recordUsage = async ({
   usage,
   latencyMs = 0,
   error = null,
+  audioSec = { in: 0, out: 0 },
 }) => {
   await AiUsage.create({
     model,
@@ -107,6 +109,7 @@ export const recordUsage = async ({
     status,
     tokens: normalizeUsage(usage),
     latencyMs,
+    audioSec,
     error: error ? String(error).slice(0, 500) : null,
     createdAt: new Date(),
   });
@@ -120,7 +123,7 @@ const count = (status) => ({ $sum: { $cond: [{ $eq: ['$status', status] }, 1, 0]
 
 /** Today's (Pacific) usage per model, including configured models with no calls yet. */
 export const usageToday = async () => {
-  const { tiers, limits } = await getAiSettings();
+  const { tiers, limits, voice } = await getAiSettings();
   const rows = await AiUsage.aggregate([
     { $match: { createdAt: { $gte: pacificDayStart() } } },
     {
@@ -132,11 +135,12 @@ export const usageToday = async () => {
         errors: count('error'),
         blocked: count('blocked'),
         mock: count('mock'),
+        audioSec: { $sum: { $add: [{ $ifNull: ['$audioSec.in', 0] }, { $ifNull: ['$audioSec.out', 0] }] } },
       },
     },
   ]);
   const byModel = new Map(rows.map((r) => [r._id, r]));
-  const configured = Object.values(tiers).flatMap((t) => [t.model, t.fallback]);
+  const configured = [...Object.values(tiers), voice ?? {}].flatMap((t) => [t.model, t.fallback]);
   const ids = new Set([...configured.filter(Boolean), ...byModel.keys()]);
   return [...ids].sort().map((model) => {
     const r = byModel.get(model) ?? {};
@@ -148,6 +152,7 @@ export const usageToday = async () => {
       errors: r.errors ?? 0,
       blocked: r.blocked ?? 0,
       mock: r.mock ?? 0,
+      audioMin: Math.round((r.audioSec ?? 0) / 6) / 10,
       limits: limitsFor(model, limits),
       free: FREE_TIER.has(model),
     };

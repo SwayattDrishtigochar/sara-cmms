@@ -1,8 +1,9 @@
-import { Info, OctagonAlert, RefreshCw, TriangleAlert } from 'lucide-react';
+import { Info, OctagonAlert, RefreshCw, TriangleAlert, Wrench } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import { Link } from 'react-router';
 import remarkGfm from 'remark-gfm';
 import { useSession } from '../auth/useAuth.js';
-import { cn } from '../lib/format.js';
+import { cn, refLabel } from '../lib/format.js';
 import { fieldLabel, formatValue } from '../machines/telemetry.js';
 import { AiProvenance, Badge } from '../ui/core.jsx';
 import { useScan } from './useAnomalies.js';
@@ -90,6 +91,28 @@ export const SeverityBadge = ({ severity, className }) => {
 };
 
 export const StateBadge = ({ state }) => <Badge value={state}>{STATE_LABEL[state] ?? state}</Badge>;
+
+/** "WO-n opened automatically", linked to the work order SARA raised for this anomaly. */
+export const AutoWorkOrderBadge = ({ anomaly, className }) => {
+  if (!anomaly?.autoWorkOrderAt || !anomaly.workOrderId) return null;
+  const wo = anomaly.workOrderId;
+  const id = wo._id ?? wo;
+  return (
+    <Link
+      to={`/m/workorders/${id}`}
+      onClick={(e) => e.stopPropagation()}
+      className={cn(
+        'inline-flex rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ai/40',
+        className,
+      )}
+    >
+      <Badge tone="ai">
+        <Wrench className="size-3" aria-hidden />
+        {wo.workOrderId ?? refLabel(wo)} opened automatically
+      </Badge>
+    </Link>
+  );
+};
 
 /** The AI's deviation text ("+4.2σ"), or observed vs expected as a percentage. */
 export const deviationOf = (p) => {

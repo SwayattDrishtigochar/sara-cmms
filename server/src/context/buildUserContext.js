@@ -24,7 +24,6 @@ const companySummary = (company) => ({
     symbol: company.preferences?.currency?.symbol ?? '₹',
   },
   features: company.features ?? {},
-  isSimulated: Boolean(company.isSimulated),
   isPlatform: Boolean(company.isPlatform),
 });
 

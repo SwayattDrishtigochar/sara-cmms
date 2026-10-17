@@ -3,12 +3,12 @@ import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { MOD_KEY } from '../assistant/AskSara.jsx';
 import { useSession } from '../auth/useAuth.js';
-import { formatNumber } from '../lib/format.js';
+import { formatNumber, humanize } from '../lib/format.js';
 import { mergeStream, useStream } from '../store/streamStore.js';
 import { useUi } from '../store/ui.js';
-import { humanize } from '../superadmin/simUtils.js';
 import { Badge, Button, Kbd } from '../ui/core.jsx';
 import { Sheet } from '../ui/overlay.jsx';
+import { VoiceButton } from '../voice/VoiceButton.jsx';
 import { ConversationList } from './ConversationList.jsx';
 import { Thread } from './Thread.jsx';
 import { TIER_OPTIONS, useTierModel } from './TierSelect.jsx';
@@ -72,6 +72,7 @@ const ContextPanel = ({ conversationId }) => {
             ['New line', 'Shift Enter'],
             ['SARA on any page', `${MOD_KEY} J`],
             ['Search and jump', `${MOD_KEY} K`],
+            ['Talk to SARA', `${MOD_KEY} Shift Space`],
           ].map(([what, keys]) => (
             <li key={what} className="flex items-center justify-between gap-2">
               {what} <Kbd>{keys}</Kbd>
@@ -122,6 +123,7 @@ export const ChatPage = () => {
             <PanelLeft className="size-4" />
           </Button>
           <h1 className="min-w-0 flex-1 truncate px-1 text-sm font-semibold text-fg">{title}</h1>
+          {id && <VoiceButton conversationId={id} variant="inline" />}
           <Button variant="ghost" size="iconSm" aria-label="New chat" title="New chat" onClick={startNew}>
             <SquarePen className="size-4" />
           </Button>

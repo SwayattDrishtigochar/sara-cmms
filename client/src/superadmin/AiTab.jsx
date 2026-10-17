@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  AudioLines,
   Check,
   Cpu,
   FlaskConical,
@@ -46,6 +47,8 @@ export const modelsInUse = (settings, usage = []) => [
   ...new Set(
     [
       ...Object.values(settings?.tiers ?? {}).flatMap((t) => [t?.model, t?.fallback]),
+      settings?.voice?.model,
+      settings?.voice?.fallback,
       ...Object.keys(settings?.limits ?? {}),
       ...usage.map((u) => u.model),
     ].filter(Boolean),
@@ -300,6 +303,7 @@ const QuotaRow = ({ model, limit, usage, free, onChange }) => {
             {calls} of {limit.rpd} calls today
           </span>
           {usage?.tokens > 0 && <span>{formatNumber(usage.tokens)} tokens</span>}
+          {usage?.audioMin > 0 && <span>{usage.audioMin} min of audio</span>}
           {usage?.rateLimited > 0 && (
             <span className="flex items-center gap-1 text-warn">
               <TriangleAlert className="size-3" aria-hidden />
@@ -334,6 +338,148 @@ const QuotaRow = ({ model, limit, usage, free, onChange }) => {
         )}
       </Field>
     </div>
+  );
+};
+
+/**
+ * Superadmin → AI → Voice: SARA's spoken assistant (Gemini Live). Works with `voice` missing from the draft
+ * and with /voice/* failing: the selects then offer only the current value.
+ */
+const VoiceSection = ({ voice = {}, onChange }) => {
+  const models = useQuery({
+    queryKey: ['voice', 'models'],
+    queryFn: ({ signal }) => api('/voice/models', { signal }),
+    staleTime: 10 * 60_000,
+  });
+  const config = useQuery({
+    queryKey: ['voice', 'config'],
+    queryFn: ({ signal }) => api('/voice/config', { signal }),
+    staleTime: 5 * 60_000,
+  });
+  const modelList = models.data?.models ?? [];
+  const voices = config.data?.voices ?? [];
+  const languages = config.data?.languages ?? [];
+  const set = (key) => (value) => onChange({ [key]: value });
+  const int = (key) => (e) => {
+    const n = Number(e.target.value);
+    if (e.target.value !== '' && Number.isInteger(n)) onChange({ [key]: n });
+  };
+  const voiceName = voice.voiceName ?? 'Kore';
+  const languageCode = voice.languageCode ?? 'auto';
+  return (
+    <Section
+      id="ai-voice"
+      icon={AudioLines}
+      title="Voice"
+      description="SARA's spoken assistant on Gemini Live. Female voices only; she answers in the speaker's language unless one is fixed."
+      actions={
+        models.isError && (
+          <span className="text-xs text-critical">Couldn't list voice models: {models.error.message}</span>
+        )
+      }
+    >
+      <Card className="space-y-4 p-4">
+        <Switch
+          id="ai-voice-enabled"
+          label="Voice assistant"
+          checked={voice.enabled ?? true}
+          onChange={set('enabled')}
+        />
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <Field label="Model">
+            {(p) => (
+              <Select
+                {...p}
+                aria-label="Voice model"
+                value={voice.model ?? ''}
+                onChange={(e) => onChange({ model: e.target.value })}
+              >
+                {!voice.model && <option value="">Server default</option>}
+                <ModelOptions models={modelList} current={voice.model} />
+              </Select>
+            )}
+          </Field>
+          <Field label="Fallback">
+            {(p) => (
+              <Select
+                {...p}
+                aria-label="Voice fallback model"
+                value={voice.fallback ?? ''}
+                onChange={(e) => onChange({ fallback: e.target.value || null })}
+              >
+                <option value="">None</option>
+                <ModelOptions models={modelList} current={voice.fallback} />
+              </Select>
+            )}
+          </Field>
+          <Field label="Voice">
+            {(p) => (
+              <Select
+                {...p}
+                aria-label="SARA's voice"
+                value={voiceName}
+                onChange={(e) => onChange({ voiceName: e.target.value })}
+              >
+                {voices.map((v) => (
+                  <option key={v.name} value={v.name}>
+                    {v.name} · {v.style}
+                  </option>
+                ))}
+                {!voices.some((v) => v.name === voiceName) && <option value={voiceName}>{voiceName}</option>}
+              </Select>
+            )}
+          </Field>
+          <Field label="Language" help="Auto answers in the language the user speaks, Hinglish included.">
+            {(p) => (
+              <Select
+                {...p}
+                aria-label="Voice language"
+                value={languageCode}
+                onChange={(e) => onChange({ languageCode: e.target.value })}
+              >
+                {languages.map((l) => (
+                  <option key={l.code} value={l.code}>
+                    {l.label}
+                  </option>
+                ))}
+                {!languages.some((l) => l.code === languageCode) && (
+                  <option value={languageCode}>{languageCode}</option>
+                )}
+              </Select>
+            )}
+          </Field>
+          <Field label="Max session" help="1–30 minutes per voice session.">
+            {(p) => (
+              <Input
+                {...p}
+                type="number"
+                min={1}
+                max={30}
+                suffix="min"
+                value={voice.maxSessionMin ?? 10}
+                onChange={int('maxSessionMin')}
+              />
+            )}
+          </Field>
+          <Field label="Concurrent sessions" help="Voice sessions open at once, server-wide (1–50).">
+            {(p) => (
+              <Input
+                {...p}
+                type="number"
+                min={1}
+                max={50}
+                value={voice.maxConcurrent ?? 3}
+                onChange={int('maxConcurrent')}
+              />
+            )}
+          </Field>
+        </div>
+        <p className="text-xs text-subtle">
+          Each voice connection counts as one request of its model's quota (see Quotas). Audio is never
+          stored.
+        </p>
+      </Card>
+    </Section>
   );
 };
 
@@ -436,6 +582,11 @@ export const AiTab = () => {
     setDraft((d) => ({ ...d, tiers: { ...d.tiers, [key]: { ...d.tiers?.[key], ...patch } } }));
   const setField = (key, value) => setDraft((d) => ({ ...d, [key]: value }));
   const setGroup = (group, key, value) => setDraft((d) => ({ ...d, [group]: { ...d[group], [key]: value } }));
+  const setAutoWo = (patch) =>
+    setDraft((d) => ({
+      ...d,
+      anomaly: { ...d.anomaly, autoWorkOrder: { ...d.anomaly?.autoWorkOrder, ...patch } },
+    }));
   const number = (fn) => (e) => {
     const n = Number(e.target.value);
     if (!Number.isNaN(n)) fn(n);
@@ -535,6 +686,11 @@ export const AiTab = () => {
         </Card>
       </Section>
 
+      <VoiceSection
+        voice={draft.voice}
+        onChange={(patch) => setDraft((d) => ({ ...d, voice: { ...d.voice, ...patch } }))}
+      />
+
       <Section
         id="ai-background"
         icon={Radar}
@@ -588,6 +744,41 @@ export const AiTab = () => {
                   checked={draft.anomaly?.investigate}
                   onChange={(v) => setGroup('anomaly', 'investigate', v)}
                 />
+                <Switch
+                  id="ai-anomaly-autowo"
+                  label="Open a work order automatically"
+                  checked={draft.anomaly?.autoWorkOrder?.enabled}
+                  onChange={(v) => setAutoWo({ enabled: v })}
+                />
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <Field
+                    label="After consecutive scans"
+                    help="A critical anomaly opens one at once; others once the AI has seen them this often."
+                  >
+                    {(p) => (
+                      <Input
+                        {...p}
+                        type="number"
+                        min={1}
+                        max={10}
+                        value={draft.anomaly?.autoWorkOrder?.afterScans ?? ''}
+                        onChange={number((n) => setAutoWo({ afterScans: n }))}
+                      />
+                    )}
+                  </Field>
+                  <Field label="Minimum severity">
+                    {(p) => (
+                      <Select
+                        {...p}
+                        value={draft.anomaly?.autoWorkOrder?.minSeverity ?? 'warning'}
+                        onChange={(e) => setAutoWo({ minSeverity: e.target.value })}
+                      >
+                        <option value="warning">Warning</option>
+                        <option value="critical">Critical</option>
+                      </Select>
+                    )}
+                  </Field>
+                </div>
               </div>
             </div>
           </div>

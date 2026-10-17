@@ -1,4 +1,5 @@
 import { plantOf, zoneOf } from '../agent/tools/common.js';
+import { badRequest } from '../lib/errors.js';
 import { shiftWindows, workingIntervals } from '../lib/shifts.js';
 import { scopeFilter } from '../modules/records.js';
 import { getModule } from '../modules/registry.js';
@@ -16,6 +17,25 @@ const OPEN_JOBS = ['Open', 'In Progress', 'On Hold'];
 const DONE_WORK = ['Completed', 'Closed'];
 const ACTIVE_ANOMALY = ['open', 'acknowledged'];
 export const DEFAULT_EFFICIENCY = 0.85;
+
+/** Plans look at most this far ahead (calendars and rosters loop day by day per machine and person). */
+export const MAX_PLAN_DAYS = 90;
+const ms = (d) => new Date(d).getTime();
+
+/** 400 unless every date lies within [now − 1 day, now + MAX_PLAN_DAYS days]: the planners' trust boundary. */
+export const assertPlanDates = (now, dates) => {
+  const bad = dates.filter(Boolean).find((d) => {
+    const t = ms(d);
+    return t < ms(now) - DAY || t > ms(now) + MAX_PLAN_DAYS * DAY;
+  });
+  if (bad) throw badRequest(`Plan at most ${MAX_PLAN_DAYS} days ahead (got ${new Date(bad).toISOString()})`);
+};
+
+/** 400 when a calendar or roster window is longer than any plan needs (the backstop for every caller). */
+export const assertPlanSpan = (start, end) => {
+  if (ms(end) - ms(start) > (MAX_PLAN_DAYS + 31) * DAY)
+    throw badRequest(`Plan at most ${MAX_PLAN_DAYS} days ahead`);
+};
 
 const Model = (name) => getModule(name).Model;
 const scoped = (ctx, name, where) => ({ ...where, ...scopeFilter(ctx, getModule(name)) });
@@ -109,6 +129,7 @@ export const buildCalendar = async (ctx, opts) => {
   const { plantId = null, assetIds, includeNonRunningDays = false } = opts;
   const start = new Date(opts.start);
   const end = new Date(opts.end);
+  assertPlanSpan(start, end);
   const now = opts.now ?? new Date();
   const zone = zoneOf(ctx);
 

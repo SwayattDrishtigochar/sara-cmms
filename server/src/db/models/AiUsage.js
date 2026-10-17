@@ -11,6 +11,7 @@ export const AI_PURPOSES = [
   'cost',
   'briefing',
   'planning',
+  'voice',
   'test',
 ];
 export const AI_STATUSES = ['ok', 'error', 'rate_limited', 'blocked', 'mock'];
@@ -29,6 +30,11 @@ const aiUsageSchema = new mongoose.Schema(
       total: { type: Number, default: 0 },
     },
     latencyMs: { type: Number, default: 0 },
+    // Seconds of audio sent to / received from Gemini on one Live connection (voice only).
+    audioSec: {
+      in: { type: Number, default: 0 },
+      out: { type: Number, default: 0 },
+    },
     error: { type: String, default: null },
     createdAt: { type: Date, required: true },
   },

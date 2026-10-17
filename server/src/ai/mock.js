@@ -217,7 +217,7 @@ const anomaly = (type, severity, confidence, parameters, explanation, urgencyHou
   urgencyHours,
 });
 
-const SETTLE_MS = 60 * 60_000; // about 3 thermal time constants of the simulated machines
+const SETTLE_MS = 60 * 60_000; // about 3 thermal time constants of the scripted machines
 const isEnergy = (f) => f.measurement === 'energy';
 const isPhase = (f) => /PH-\d/.test(f.field);
 

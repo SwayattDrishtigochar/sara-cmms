@@ -111,6 +111,7 @@ describe('guardrails', () => {
               anomaly({
                 parameters: [
                   { field: 'spindleLoad', observed: 50, expected: 48 }, // not on this asset
+                  { observed: 50, expected: 48 }, // no field named: never matched to an unlabelled one
                   { field: 'oilTempPv', observed: 70, expected: 48 }, // 40 % off last and mean
                   { field: 'oilTempPv', observed: 56, expected: 48 }, // 12 % off the last value
                   { field: 'vibration', observed: 2.15, expected: 2.0 },
@@ -128,6 +129,60 @@ describe('guardrails', () => {
       ['vibration', 2.15],
     ]);
     expect(a.parameters[0].unit).toBe('°C');
+    expect(out.dropped.map((d) => [d.reason, d.field])).toEqual([
+      ['unknown_field', 'spindleLoad'],
+      ['unknown_field', undefined],
+      ['observed_mismatch', 'oilTempPv'],
+    ]);
+  });
+
+  it('accepts a field cited by its label or with its unit, as the real model writes it', () => {
+    const out = applyGuardrails(
+      {
+        assets: [
+          decision({
+            anomalies: [
+              anomaly({
+                parameters: [
+                  { field: 'Oil temperature (°C)', observed: 50, expected: 48 },
+                  { field: 'vibration (mm/s)', observed: 2.2, expected: 2.0 },
+                  { field: 'Rejection rate', observed: 2.1, expected: 1.8 },
+                ],
+              }),
+            ],
+          }),
+        ],
+      },
+      [
+        feature({
+          fields: [
+            { ...field('oilTempPv'), label: 'Oil temperature' },
+            field('vibration', { unit: 'mm/s', last: 2.2, mean: 2.1 }),
+          ],
+        }),
+      ],
+    );
+    expect(out.assets[0].anomalies[0].parameters.map((p) => p.field)).toEqual([
+      'oilTempPv',
+      'vibration',
+      'rejectionRate',
+    ]);
+    expect(out.dropped).toEqual([]);
+  });
+
+  it('says why an info or unsure finding opens no anomaly', () => {
+    const out = applyGuardrails(
+      {
+        assets: [
+          decision({
+            anomalies: [anomaly({ severity: 'info' }), anomaly({ type: 'other', confidence: 0.5 })],
+          }),
+        ],
+      },
+      features,
+    );
+    expect(out.assets[0]).toMatchObject({ state: 'watch', anomalies: [] });
+    expect(out.dropped.map((d) => d.reason)).toEqual(['info_severity', 'unconfident_other']);
   });
 
   it('accepts the rejection rate as a citable figure', () => {
@@ -236,9 +291,73 @@ describe('guardrails', () => {
     expect(sure.assets[0]).toMatchObject({ state: 'anomalous', anomalies: [{ type: 'other' }] });
   });
 
+  it('keeps a real gemini-3.5-flash-lite answer as recorded (IMM 2, bearing wear injection, 2026-10-17)', () => {
+    const imm2 = feature({
+      assetId: 'd61c9b11fe6e50e4520b340d',
+      name: 'IMM 2',
+      fields: [
+        field('vibration', {
+          unit: 'mm/s',
+          label: 'Vibration',
+          last: 8.53,
+          mean: 6.77,
+          baseline: { mean: 2.22, std: 0.376, p5: 1.7, p95: 2.8, source: 'history' },
+          z: 12.1,
+          band: 'above',
+          flags: ['z', 'band', 'spikes'],
+        }),
+        field('motorCurrent', {
+          unit: 'A',
+          label: 'Motor current',
+          last: 50.51,
+          mean: 47.01,
+          baseline: { mean: 37.82, std: 3.333, p5: 33, p95: 43, source: 'history' },
+          z: 2.8,
+          band: 'above',
+          flags: ['band'],
+        }),
+      ],
+      flags: ['z', 'band', 'spikes'],
+    });
+    const recorded = {
+      assets: [
+        {
+          assetId: 'd61c9b11fe6e50e4520b340d',
+          healthScore: 45,
+          state: 'anomalous',
+          summary:
+            'IMM 2 shows severely elevated vibration and motor current indicating potential mechanical distress.',
+          anomalies: [
+            {
+              type: 'vibration_high',
+              severity: 'critical',
+              confidence: 0.95,
+              parameters: [
+                { field: 'vibration', observed: 6.77, expected: 2.22, deviation: '+12.1σ, rising' },
+                { field: 'motorCurrent', observed: 47.01, expected: 37.82, deviation: '+2.8σ, above band' },
+              ],
+              explanation:
+                'Vibration has risen to a 10-minute mean of 6.77 mm/s against a baseline of 2.22 mm/s.',
+              likelyCauses: ['Worn or damaged motor/gearbox bearings'],
+              recommendedActions: ['Inspect mechanical drive components and bearings immediately'],
+              urgencyHours: 4,
+            },
+          ],
+        },
+      ],
+    };
+    const out = applyGuardrails(recorded, [imm2]);
+    expect(out.dropped).toEqual([]);
+    expect(out.assets[0]).toMatchObject({ healthScore: 45, state: 'anomalous' });
+    expect(out.assets[0].anomalies[0].parameters.map((p) => [p.field, p.unit, p.observed])).toEqual([
+      ['vibration', 'mm/s', 6.77],
+      ['motorCurrent', 'A', 47.01],
+    ]);
+  });
+
   it('tolerates garbage', () => {
-    expect(applyGuardrails(null, features)).toEqual({ assets: [] });
-    expect(applyGuardrails({ assets: 'x' }, features)).toEqual({ assets: [] });
+    expect(applyGuardrails(null, features)).toEqual({ assets: [], dropped: [] });
+    expect(applyGuardrails({ assets: 'x' }, features)).toEqual({ assets: [], dropped: [] });
     expect(observedMatches(Number.NaN, field('x'))).toBe(false);
     expect(observedMatches(49.5, field('x', { last: 60, mean: 49 }))).toBe(true);
   });
@@ -283,6 +402,21 @@ describe('due assets', () => {
     expect(ids(dueAssets(features, base))).toEqual(['newly', 'healthy', 'worse', 'stale', 'never']);
     expect(evidenceOf(features[4])).toEqual(['oilTempPv:z', 'oilTempPv:band']);
     expect(evidenceOf(feature({ flags: ['rejects'] }))).toEqual(['rejects']);
+  });
+
+  it('re-reviews a deviation that keeps growing past 5σ and 10σ, not one that stays put', () => {
+    const vib = (z) =>
+      feature({ assetId: 'imm', flags: ['z'], fields: [field('vibration', { z, flags: ['z'] })] });
+    expect(evidenceOf(vib(3.7))).toEqual(['vibration:z']);
+    expect(evidenceOf(vib(-6.2))).toEqual(['vibration:z', 'vibration:z5']);
+    expect(evidenceOf(vib(12))).toEqual(['vibration:z', 'vibration:z5', 'vibration:z10']);
+    const judged = {
+      ...base,
+      lastReviewedAt: new Map([quiet('imm', 1)]),
+      lastEvidence: new Map([['imm', new Set(evidenceOf(vib(3.7)))]]),
+    };
+    expect(ids(dueAssets([vib(4.4)], judged))).toEqual([]);
+    expect(ids(dueAssets([vib(6.2)], judged))).toEqual(['imm']);
   });
 
   it('reviews everything when forced or when alwaysAskAi is on', () => {
@@ -498,9 +632,9 @@ describe('prompt and schema', () => {
       'rejection rate 2.1 % (42 of 2000 parts in the last 3.5 h), reference 1.8 % (7 days), z +1',
     );
     expect(text).toContain('screens fired: z');
-    expect(text).toContain('field | label | last |');
+    expect(text).toContain('field | label (unit) | last |');
     expect(text).toContain(
-      'oilTempPv (°C) | Oil temperature | 50 | 49 | 48±0.4 (history) | +2.5 | +1 | – | –',
+      'oilTempPv | Oil temperature (°C) | 50 | 49 | 48±0.4 (history) | +2.5 | +1 | – | –',
     );
   });
 

@@ -1,20 +1,23 @@
 import { DateTime } from 'luxon';
-import { DATE_TOKENS } from '../agent/tools/common.js';
+import { DATE_TOKENS, labelsFor, plantOf, zoneOf } from '../agent/tools/common.js';
 import { badRequest, forbidden } from '../lib/errors.js';
 import { escapeRegex } from '../lib/format.js';
 import { can } from '../modules/permissions.js';
 import { records, scopeFilter } from '../modules/records.js';
 import { getModule } from '../modules/registry.js';
-import { buildCalendar } from './capacity.js';
+import { assertPlanDates, buildCalendar } from './capacity.js';
 import { advanceWorking, intersectIntervals, totalSeconds } from './intervals.js';
+import { loadPeople } from './people.js';
+import { assignOperators, operatorFields } from './productionOperators.js';
 import { createProposal } from './proposals.js';
 
 /**
- * Production planner (phase 5 §3.2, F1): part + quantity + due date → one job card per capable mould on
- * its best machine, the quantity split by capacity, feasibility, risks and alternatives, as proposal ops.
+ * Production planner (phase 5 §3.2, F1; phase 7 §3.2): part + quantity + due date → one job card per capable
+ * mould on its best machine, the quantity split by capacity, an operator per shift, feasibility with a
+ * verdict, issues and adjustments, risks and alternatives, as proposal ops.
  */
 
-const HOUR = 3_600_000;
+export const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const QUARTER = 15 * 60_000;
 const OPERATION = {
@@ -24,10 +27,10 @@ const OPERATION = {
 };
 const ms = (d) => new Date(d).getTime();
 const r1 = (n) => Math.round(n * 10) / 10;
-const pcs = (n) => Math.round(n).toLocaleString('en-IN');
+export const pcs = (n) => Math.round(n).toLocaleString('en-IN');
 const sum = (list, f) => list.reduce((a, x) => a + f(x), 0);
-const cut = (text) => (text.length > 300 ? `${text.slice(0, 299)}…` : text);
-const same = (a, b) =>
+export const cut = (text) => (text.length > 300 ? `${text.slice(0, 299)}…` : text);
+export const same = (a, b) =>
   String(a ?? '')
     .trim()
     .toLowerCase() ===
@@ -35,7 +38,8 @@ const same = (a, b) =>
     .trim()
     .toLowerCase();
 
-const fmt = (cal, d, time = false) =>
+/** Date (and time) in the calendar's zone and the company's date format. */
+export const fmt = (cal, d, time = false) =>
   DateTime.fromJSDate(new Date(d), { zone: cal.timeZone }).toFormat(
     `${DATE_TOKENS[cal.dateFormat] ?? 'dd-MM-yyyy'}${time ? ' HH:mm' : ''}`,
   );
@@ -43,6 +47,187 @@ const fmt = (cal, d, time = false) =>
 /** Can this user ask the production planner (jobcards create + production switched on)? */
 export const canPlanProduction = (ctx) =>
   ctx.company?.features?.productionEnabled === true && can(ctx, getModule('jobcards'), 'create');
+
+/** doable ⇔ no issues; not_doable ⇔ a critical issue no adjustment resolves; else adjust (§3.3). */
+export const verdictOf = (issues, adjustments) => {
+  if (!issues.length) return 'doable';
+  const stuck = issues.some(
+    (x, i) => x.severity === 'critical' && !adjustments.some((a) => a.resolves?.includes(i)),
+  );
+  return stuck ? 'not_doable' : 'adjust';
+};
+
+export const planTitle = (cal, partName, quantity, dueDate) =>
+  `${pcs(quantity)} × ${partName} by ${fmt(cal, dueDate)}`;
+
+/**
+ * Per card the most good parts it makes by `dueDate` and, when its end has to move, that end (ISO).
+ * `finishFor(card, q)` → when q parts are done from the card's start (null: never). Binary search over q.
+ */
+export const fitByDue = (jobCards, dueDate, finishFor) =>
+  jobCards.map((c) => {
+    const fits = (q) => {
+      const end = finishFor(c, q);
+      return end && ms(end) <= ms(dueDate) ? end : null;
+    };
+    const whole = fits(c.target);
+    if (whole)
+      return {
+        key: c.key,
+        target: c.target,
+        ...(ms(c.end) > ms(dueDate) ? { end: whole.toISOString() } : {}),
+      };
+    let lo = 0;
+    let hi = c.target - 1;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (fits(mid)) lo = mid;
+      else hi = mid - 1;
+    }
+    return { key: c.key, target: lo, ...(lo ? { end: fits(lo).toISOString() } : {}) };
+  });
+
+/**
+ * The `late` issue with its `extend_due` and `reduce_quantity` adjustments (indexes relative to `issues`).
+ * `byDue` = fitByDue rows: reduce_quantity trims each card to what it makes by the due date and ends it there.
+ */
+export const lateIssue = (cal, { issues, adjustments, notes, projectedFinish, byDue, jobCards }) => {
+  const i = issues.push({ kind: 'late', severity: 'critical', text: cut(notes) }) - 1;
+  const extendTo = new Date(Math.ceil(ms(projectedFinish) / HOUR) * HOUR);
+  adjustments.push({
+    id: `adj-${adjustments.length + 1}`,
+    kind: 'extend_due',
+    label: `Move the due date to ${fmt(cal, extendTo, true)}`,
+    patch: { dueDate: extendTo.toISOString() },
+    resolves: [i],
+  });
+  const total = sum(jobCards, (j) => j.target);
+  const doneByDue = sum(byDue, (x) => x.target);
+  // A card that makes nothing by the due date can only be removed, not trimmed: no reduce_quantity then.
+  if (byDue.every((x) => x.target > 0) && doneByDue < total) {
+    adjustments.push({
+      id: `adj-${adjustments.length + 1}`,
+      kind: 'reduce_quantity',
+      label: `Reduce the quantity to ${pcs(doneByDue)} pcs (what is done by the due date)`,
+      patch: { quantity: doneByDue, jobCards: byDue },
+      resolves: [i],
+    });
+  }
+};
+
+/** Card targets scaled to `quantity` (the largest card absorbs the rounding); with `finishFor`, each ends at its new finish. */
+export const trimTargets = (jobCards, quantity, finishFor) => {
+  const total = sum(jobCards, (j) => j.target);
+  const rows = jobCards.map((j) => ({
+    key: j.key,
+    target: Math.max(1, Math.floor((j.target * quantity) / total)),
+  }));
+  const largest = rows.reduce((a, b) => (b.target > a.target ? b : a));
+  largest.target += quantity - sum(rows, (x) => x.target);
+  for (const [i, row] of rows.entries()) {
+    const end = finishFor?.(jobCards[i], row.target);
+    if (end) row.end = end.toISOString();
+  }
+  return rows;
+};
+
+/** PM due, open anomaly and tool-life risks of one job card on its machine. */
+export const cardRisks = (cal, { machine: m, tool, start, end, shots }) => {
+  const risks = [];
+  for (const t of m.dueTasks ?? []) {
+    if (ms(t.due) >= ms(start) && ms(t.due) <= ms(end)) {
+      risks.push({
+        kind: 'pm_due',
+        severity: 'warning',
+        text: cut(`${t.code} (${t.name}) is due on ${m.name} on ${fmt(cal, t.due)}`),
+        assetId: m.assetId,
+      });
+    }
+  }
+  for (const a of m.openAnomalies ?? []) {
+    risks.push({
+      kind: 'anomaly',
+      severity: a.severity,
+      text: cut(`${a.code} (${a.summary ?? a.type}) is open on ${m.name}`),
+      assetId: m.assetId,
+    });
+  }
+  if (tool.maxShotLife > 0 && tool.shotCount + shots > tool.maxShotLife) {
+    risks.push({
+      kind: 'tool_life',
+      severity: 'warning',
+      text: `${tool.toolNumber ?? tool.name} passes its shot life during this job (${pcs(tool.shotCount + shots)} of ${pcs(tool.maxShotLife)} shots)`,
+      assetId: m.assetId,
+    });
+  }
+  return risks;
+};
+
+/** The seq-0 `create productionplans` op. */
+export const planOp = ({ title, partName, quantity, dueDate, plantId, customerId }) => ({
+  seq: 0,
+  op: 'create',
+  module: 'productionplans',
+  label: `Production plan: ${title}`,
+  data: {
+    partName,
+    quantity,
+    dueDate,
+    priority: 'Medium',
+    status: 'Planned',
+    ...(plantId ? { plantId } : {}),
+    ...(customerId ? { customer: String(customerId) } : {}),
+  },
+});
+
+/** The `create jobcards` op of one card (§3.2 step 11); `operators` fill assignedTo/operatorPlan. */
+export const jobCardOp = ({
+  seq,
+  machine: m,
+  tool,
+  part,
+  partName,
+  q,
+  r,
+  start,
+  end,
+  planRef,
+  customerName,
+  operators = [],
+}) => ({
+  seq,
+  op: 'create',
+  module: 'jobcards',
+  label: `${m.name}: ${pcs(q)} × ${partName} with ${tool.toolNumber ?? tool.name}`,
+  data: {
+    jobName: `${partName} – ${customerName ?? 'stock'}`,
+    asset: m.assetId,
+    tool: tool.toolId,
+    productionPlanId: planRef,
+    partName,
+    target: q,
+    idealCycleTime: tool.cycleSec,
+    rejectionPercentage: r1(r * 100),
+    startDate: start,
+    endDate: end,
+    mouldParts: [
+      {
+        partNameId: part.id,
+        partName: part.partName,
+        assignedPartPerShot: part.perShot,
+        ...(part.weight != null ? { partWeightKg: part.weight / 1000 } : {}),
+      },
+    ],
+    operations: [
+      {
+        operationName: OPERATION[m.typeOfAsset] ?? 'Processing',
+        assetId: m.assetId,
+        cycleTime: tool.cycleSec,
+      },
+    ],
+    ...operatorFields(operators),
+  },
+});
 
 /** Working seconds a job of `q` good parts needs on a slot, setup included. */
 const jobSeconds = (slot, q) => slot.setupSec + Math.ceil(q / (1 - slot.r) / slot.perShot) * slot.secPerShot;
@@ -206,36 +391,9 @@ export const planProduction = (calendar, input, { now = new Date(), rejectionRat
     ? `On time: finishes ${fmt(calendar, projectedFinish, true)}, ${slackHours} h before the due date`
     : `Late: ${pcs(shortfall)} pcs short on ${fmt(calendar, dueDate)}; all parts done by ${fmt(calendar, projectedFinish, true)}`;
 
-  const risks = [];
-  for (const { slot, end, shots } of jobs) {
-    const { machine: m, tool } = slot;
-    for (const t of m.dueTasks ?? []) {
-      if (ms(t.due) >= ms(slot.start) && ms(t.due) <= ms(end)) {
-        risks.push({
-          kind: 'pm_due',
-          severity: 'warning',
-          text: cut(`${t.code} (${t.name}) is due on ${m.name} on ${fmt(calendar, t.due)}`),
-          assetId: m.assetId,
-        });
-      }
-    }
-    for (const a of m.openAnomalies) {
-      risks.push({
-        kind: 'anomaly',
-        severity: a.severity,
-        text: cut(`${a.code} (${a.summary ?? a.type}) is open on ${m.name}`),
-        assetId: m.assetId,
-      });
-    }
-    if (tool.maxShotLife > 0 && tool.shotCount + shots > tool.maxShotLife) {
-      risks.push({
-        kind: 'tool_life',
-        severity: 'warning',
-        text: `${tool.toolNumber ?? tool.name} passes its shot life during this job (${pcs(tool.shotCount + shots)} of ${pcs(tool.maxShotLife)} shots)`,
-        assetId: m.assetId,
-      });
-    }
-  }
+  const risks = jobs.flatMap(({ slot, end, shots }) =>
+    cardRisks(calendar, { machine: slot.machine, tool: slot.tool, start: slot.start, end, shots }),
+  );
   if (!feasible) risks.push({ kind: 'late', severity: 'critical', text: cut(notes) });
 
   const alternatives = [];
@@ -272,7 +430,7 @@ export const planProduction = (calendar, input, { now = new Date(), rejectionRat
   }
 
   const planRef = input.productionPlanId ? String(input.productionPlanId) : '$op:0';
-  const title = `${pcs(quantity)} × ${partName} by ${fmt(calendar, dueDate)}`;
+  const title = planTitle(calendar, partName, quantity, dueDate);
   const ops = [
     input.productionPlanId
       ? {
@@ -283,59 +441,26 @@ export const planProduction = (calendar, input, { now = new Date(), rejectionRat
           label: `Mark ${input.planCode ?? 'the production plan'} as planned`,
           data: { status: 'Planned' },
         }
-      : {
-          seq: 0,
-          op: 'create',
-          module: 'productionplans',
-          label: `Production plan: ${title}`,
-          data: {
-            partName,
-            quantity,
-            dueDate,
-            priority: 'Medium',
-            status: 'Planned',
-            ...(plantId ? { plantId } : {}),
-          },
-        },
-    ...jobs.map(({ slot, q, end }, i) => {
-      const { machine: m, tool, part } = slot;
-      return {
+      : planOp({ title, partName, quantity, dueDate, plantId, customerId: input.customerId }),
+    ...jobs.map(({ slot, q, end }, i) =>
+      jobCardOp({
         seq: i + 1,
-        op: 'create',
-        module: 'jobcards',
-        label: `${m.name}: ${pcs(q)} × ${partName} with ${tool.toolNumber ?? tool.name}`,
-        data: {
-          jobName: `${partName} – ${input.customerName ?? 'stock'}`,
-          asset: m.assetId,
-          tool: tool.toolId,
-          productionPlanId: planRef,
-          partName,
-          target: q,
-          idealCycleTime: tool.cycleSec,
-          rejectionPercentage: r1(r * 100),
-          startDate: slot.start,
-          endDate: end,
-          mouldParts: [
-            {
-              partNameId: part.id,
-              partName: part.partName,
-              assignedPartPerShot: part.perShot,
-              ...(part.weight != null ? { partWeightKg: part.weight / 1000 } : {}),
-            },
-          ],
-          operations: [
-            {
-              operationName: OPERATION[m.typeOfAsset] ?? 'Processing',
-              assetId: m.assetId,
-              cycleTime: tool.cycleSec,
-            },
-          ],
-        },
-      };
-    }),
+        machine: slot.machine,
+        tool: slot.tool,
+        part: slot.part,
+        partName,
+        q,
+        r,
+        start: slot.start,
+        end,
+        planRef,
+        customerName: input.customerName,
+      }),
+    ),
   ];
 
-  const jobCards = jobs.map(({ slot, q, end, shots }) => ({
+  const jobCards = jobs.map(({ slot, q, end, shots }, i) => ({
+    key: `op-${i + 1}`,
     assetId: slot.machine.assetId,
     asset: slot.machine.name,
     toolId: slot.tool.toolId,
@@ -344,8 +469,17 @@ export const planProduction = (calendar, input, { now = new Date(), rejectionRat
     setupMin: slot.setupSec / 60,
     start: slot.start,
     end,
+    finishAt: end,
     shots,
+    operators: [],
   }));
+  const issues = [];
+  const adjustments = [];
+  if (!feasible) {
+    const slots = new Map(jobs.map((j, i) => [`op-${i + 1}`, j.slot]));
+    const byDue = fitByDue(jobCards, dueDate, (c, q) => finishOf(slots.get(c.key), q));
+    lateIssue(calendar, { issues, adjustments, notes, projectedFinish, byDue, jobCards });
+  }
   const bars = jobs.flatMap(({ slot, q, end, shots, setupEnd }, i) => [
     ...(setupEnd
       ? [
@@ -378,7 +512,17 @@ export const planProduction = (calendar, input, { now = new Date(), rejectionRat
   return {
     title,
     jobCards,
-    feasibility: { feasible, dueDate, projectedFinish, slackHours, shortfall, notes },
+    feasibility: {
+      feasible,
+      verdict: verdictOf(issues, adjustments),
+      dueDate,
+      projectedFinish,
+      slackHours,
+      shortfall,
+      notes,
+      issues,
+      adjustments,
+    },
     risks,
     alternatives,
     ops,
@@ -393,7 +537,7 @@ export const planProduction = (calendar, input, { now = new Date(), rejectionRat
 };
 
 /** Σ rejected ÷ (Σ good + Σ rejected) of the part over the last 30 days; null without data. */
-const historicalRejection = async (ctx, partName, now) => {
+export const historicalRejection = async (ctx, partName, now) => {
   const since = new Date(ms(now) - 30 * DAY);
   const partRx = { $regex: `^${escapeRegex(partName.trim())}$`, $options: 'i' };
   const [rejections, jobs] = await Promise.all([
@@ -439,7 +583,13 @@ export const proposeProduction = async (ctx, input, { now = new Date() } = {}) =
   const dueDate = new Date(base.dueDate);
   if (Number.isNaN(dueDate.getTime()) || dueDate <= now)
     throw badRequest('The due date must be in the future');
+  // A past start just means "now" (planProduction clamps it); only how far ahead matters.
+  assertPlanDates(now, [dueDate, base.start && new Date(Math.max(ms(base.start), ms(now)))]);
   base.dueDate = dueDate;
+  if (input.customerId && !base.customerName) {
+    const labels = await labelsFor(ctx, 'customers', [String(input.customerId)]);
+    base.customerName = labels.get(String(input.customerId)) ?? null;
+  }
 
   const range = { plantId: base.plantId, start: now, end: new Date(ms(dueDate) + 14 * DAY), now };
   const calendar = await buildCalendar(ctx, range);
@@ -451,6 +601,31 @@ export const proposeProduction = async (ctx, input, { now = new Date() } = {}) =
     plan = planProduction(calendar, base, { now, rejectionRate, extraCalendar });
   }
   const horizonEnd = Math.max(ms(plan.feasibility.projectedFinish), ms(dueDate)) + 12 * HOUR;
+
+  // Operators: one Production person per shift segment of each card (§3.2 step 2).
+  const people = await loadPeople(ctx, {
+    department: 'Production',
+    plantId: plan.plantId,
+    window: { start: now, end: new Date(horizonEnd) },
+  });
+  const assigned = assignOperators(plan.jobCards, {
+    people,
+    plant: plantOf(ctx, plan.plantId),
+    zone: zoneOf(ctx),
+    machinesById: new Map(calendar.machines.map((m) => [m.assetId, m])),
+    dateFormat: calendar.dateFormat,
+  });
+  for (const [i, card] of plan.jobCards.entries()) {
+    const { operators, issues, shifts } = assigned.get(card.key);
+    card.operators = operators;
+    card.shifts = shifts;
+    Object.assign(plan.ops[i + 1].data, operatorFields(operators));
+    plan.feasibility.issues.push(...issues);
+    const bar = plan.diff.bars.find((b) => b.id === card.key);
+    if (bar && operators.length) bar.tooltip += ` · ${[...new Set(operators.map((o) => o.name))].join(', ')}`;
+  }
+  plan.feasibility.verdict = verdictOf(plan.feasibility.issues, plan.feasibility.adjustments);
+
   return createProposal(ctx, {
     kind: 'production',
     title: plan.title,
@@ -461,16 +636,21 @@ export const proposeProduction = async (ctx, input, { now = new Date() } = {}) =
       dueDate: dueDate.toISOString(),
       ...(input.productionPlanId ? { productionPlanId: String(input.productionPlanId) } : {}),
       ...(input.plantId ? { plantId: String(input.plantId) } : {}),
+      ...(input.customerId ? { customerId: String(input.customerId) } : {}),
       ...(input.toolIds?.length ? { toolIds: input.toolIds.map(String) } : {}),
       ...(input.start ? { start: new Date(input.start).toISOString() } : {}),
       ...(input.rejectionPct != null ? { rejectionPct: input.rejectionPct } : {}),
+      // The rate the planner used, so every check of this plan counts shots the same way.
+      rejectionRate: plan.rejectionRate,
     },
     horizon: { start: new Date(Math.floor(ms(now) / HOUR) * HOUR), end: new Date(horizonEnd) },
     ...(input.productionPlanId ? { productionPlanId: String(input.productionPlanId) } : {}),
     assetIds: plan.assetIds,
     ops: plan.ops,
-    diff: plan.diff,
+    diff: { ...plan.diff, rejectionRate: plan.rejectionRate },
     feasibility: plan.feasibility,
+    issues: plan.feasibility.issues,
+    adjustments: plan.feasibility.adjustments,
     risks: plan.risks,
     alternatives: plan.alternatives,
   });

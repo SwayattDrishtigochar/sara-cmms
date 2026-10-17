@@ -1,8 +1,7 @@
 import { ChevronRight, CircleAlert, CircleCheck, Loader2, ShieldQuestion, Wrench } from 'lucide-react';
 import { useState } from 'react';
-import { cn, formatNumber } from '../lib/format.js';
+import { cn, formatNumber, humanize, plural } from '../lib/format.js';
 import { useModulesMeta } from '../modules/useModules.js';
-import { humanize, plural } from '../superadmin/simUtils.js';
 
 const VERBS = {
   mongo_find: 'Queried',

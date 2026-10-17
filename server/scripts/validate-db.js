@@ -1,14 +1,13 @@
 /**
- * Validates every document of one company against SARA's registry schemas (exit code 1 on errors).
- *   pnpm validate-db                   the simulated company
- *   pnpm validate-db --company <id>    any company
+ * Validates every document of a company against SARA's registry schemas (exit code 1 on errors).
+ *   pnpm validate-db                   every customer company
+ *   pnpm validate-db --company <id>    one company
  */
 import mongoose from 'mongoose';
 import { connectMongo } from '../src/config/mongo.js';
 import { isObjectIdString } from '../src/lib/ids.js';
 import { getModule } from '../src/modules/registry.js';
 import { validateCompany } from '../src/modules/validateCompany.js';
-import { simulatedCompany } from '../src/sim/simulatedCompany.js';
 
 const SHOWN = 50;
 
@@ -28,16 +27,9 @@ const printDetails = (title, rows) => {
   }
 };
 
-const run = async () => {
-  await connectMongo();
-  const id = companyArg();
-  const company = id ? await getModule('companies').Model.findById(id).lean() : await simulatedCompany();
-  if (!company) {
-    throw new Error(
-      id ? `No company ${id}` : 'No simulated company yet: run the simulator once, or pass --company <id>',
-    );
-  }
-  console.log(`Validating ${company.name} (${company._id})`);
+/** Validates one company and returns its error count. */
+const validateOne = async (company) => {
+  console.log(`\nValidating ${company.name} (${company._id})`);
   const { modules, errors, warnings } = await validateCompany(company._id);
   console.table(modules.filter((m) => m.docs || m.errors || m.warnings));
   printDetails('Errors', errors);
@@ -45,11 +37,26 @@ const run = async () => {
   const errorCount = modules.reduce((sum, m) => sum + m.errors, 0);
   const warningCount = modules.reduce((sum, m) => sum + m.warnings, 0);
   console.log(
-    `\n${errorCount ? `${errorCount} error(s)` : 'No schema errors'}` +
+    `${errorCount ? `${errorCount} error(s)` : 'No schema errors'}` +
       (warningCount ? `, ${warningCount} warning(s)` : ''),
   );
+  return errorCount;
+};
+
+const run = async () => {
+  await connectMongo();
+  const id = companyArg();
+  const Company = getModule('companies').Model;
+  const companies = id
+    ? [await Company.findById(id).lean()].filter(Boolean)
+    : await Company.find({ isPlatform: { $ne: true }, deleted: { $ne: true } })
+        .sort({ createdAt: 1 })
+        .lean();
+  if (!companies.length) throw new Error(id ? `No company ${id}` : 'No companies yet');
+  let errors = 0;
+  for (const company of companies) errors += await validateOne(company);
   await mongoose.disconnect();
-  process.exitCode = errorCount ? 1 : 0;
+  process.exitCode = errors ? 1 : 0;
 };
 
 run().catch(async (err) => {

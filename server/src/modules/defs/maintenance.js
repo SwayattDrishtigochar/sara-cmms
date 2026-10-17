@@ -65,6 +65,27 @@ const taskChecklist = {
   },
 };
 
+/** AI text stamp on plans: what SARA said about the plan when it was made. */
+export const AI_TEXT = {
+  type: 'object',
+  readOnly: true,
+  fields: {
+    text: { type: 'text' },
+    model: { type: 'string' },
+    at: { type: 'date' },
+    mock: { type: 'boolean' },
+  },
+};
+export const MAINTENANCE_PLAN_STATUSES = [
+  'draft',
+  'proposed',
+  'planned',
+  'in_progress',
+  'completed',
+  'cancelled',
+];
+export const MAINTENANCE_OBJECTIVES = ['protect_production', 'balanced', 'fix_fast'];
+
 const comments = {
   type: 'array',
   readOnly: true,
@@ -168,6 +189,13 @@ export default [
     list: ['assetTag', 'name', 'typeOfAsset', 'assetStatus', 'healthScore', 'location'],
     search: ['name', 'assetTag', 'serialNumber', 'modelOfAsset', 'manufacturer', 'location'],
     sort: 'name',
+    children: [
+      { module: 'workorders', field: 'asset', label: 'Work orders' },
+      { module: 'jobcards', field: 'asset', label: 'Job cards' },
+      { module: 'anomalies', field: 'assetId', label: 'Anomalies' },
+      { module: 'preventivemaintenances', field: 'assetAllocation', label: 'Preventive maintenance' },
+      { module: 'calibrations', field: 'assetAllocation', label: 'Calibrations' },
+    ],
     fields: {
       name: { type: 'string', required: true },
       assetTag: { type: 'string', label: 'Asset tag' },
@@ -252,6 +280,7 @@ export default [
       calibrationId: { type: 'ref', ref: 'calibrations', label: 'Calibration' },
       requestId: { type: 'ref', ref: 'requests', label: 'Request' },
       anomalyId: { type: 'ref', ref: 'anomalies', label: 'Anomaly' },
+      maintenancePlanId: { type: 'ref', ref: 'maintenanceplans', label: 'Maintenance plan' },
       spareParts: {
         type: 'array',
         of: {
@@ -314,6 +343,59 @@ export default [
         },
       },
       comments,
+    },
+  },
+  {
+    name: 'maintenanceplans',
+    model: 'MaintenancePlan',
+    label: 'Maintenance Plans',
+    singular: 'Maintenance plan',
+    group: 'Maintenance',
+    icon: 'CalendarCheck',
+    description:
+      'Maintenance planned as one package over a horizon: the work orders, their windows and technicians, chosen for the least production impact.',
+    agentNotes:
+      'Made by the maintenance planner (plan_maintenance with a scope, then apply_plan); the work orders link back with maintenancePlanId. metrics compare the plan with doing every task as soon as possible.',
+    permissionKey: 'work-order',
+    plantScoped: true,
+    planned: true,
+    counter: { type: 'MaintenancePlan', prefix: 'MP-', field: 'planCode' },
+    codeField: 'planCode',
+    titleField: 'name',
+    list: ['planCode', 'name', 'scope', 'objective', 'status', 'createdAt'],
+    search: ['planCode', 'name'],
+    dateField: 'createdAt',
+    sort: '-createdAt',
+    indexes: [[{ companyId: 1, updatedAt: 1 }]], // live poller: recent changes
+    children: [{ module: 'workorders', field: 'maintenancePlanId', label: 'Work orders' }],
+    fields: {
+      planCode: { type: 'string', readOnly: true, label: 'Plan #' },
+      name: { type: 'string', required: true },
+      scope: { type: 'enum', values: ['plant', 'assets'], default: 'plant' },
+      assetIds: { type: 'refs', ref: 'assets', label: 'Assets' },
+      horizon: { type: 'object', fields: { start: { type: 'date' }, end: { type: 'date' } } },
+      objective: {
+        type: 'enum',
+        values: MAINTENANCE_OBJECTIVES,
+        default: 'protect_production',
+        help: 'protect_production = least production impact, fix_fast = earliest windows',
+      },
+      status: { type: 'enum', values: MAINTENANCE_PLAN_STATUSES, default: 'draft' },
+      metrics: {
+        type: 'object',
+        readOnly: true,
+        fields: {
+          tasks: { type: 'number' },
+          zeroImpactTasks: { type: 'number' },
+          productionHoursLost: { type: 'number', unit: 'h' },
+          naiveProductionHoursLost: { type: 'number', unit: 'h' },
+          productionImpactCost: { type: 'number', unit: '₹' },
+          downtimeCostAvoided: { type: 'number', unit: '₹' },
+        },
+      },
+      aiSummary: AI_TEXT,
+      proposal: { type: 'ref', ref: 'planproposals', readOnly: true, label: 'Proposal' },
+      notes: { type: 'text' },
     },
   },
   {
@@ -410,6 +492,7 @@ export default [
     sort: '-detectedAt',
     inheritPlantFrom: ['assetId'],
     indexes: [[{ companyId: 1, updatedAt: 1 }]], // live poller: recent changes
+    children: [{ module: 'workorders', field: 'anomalyId', label: 'Work orders' }],
     fields: {
       anomalyCode: { type: 'string', readOnly: true, label: 'ID' },
       assetId: { type: 'ref', ref: 'assets', required: true, label: 'Asset' },
@@ -442,8 +525,11 @@ export default [
       resolvedAt: { type: 'date', readOnly: true },
       acknowledgedBy: { type: 'ref', ref: 'users', readOnly: true },
       workOrderId: { type: 'ref', ref: 'workorders', label: 'Work order' },
+      autoWorkOrderAt: { type: 'date', readOnly: true, label: 'Work order opened automatically' },
       model: { type: 'string', readOnly: true, label: 'AI model' },
       cleanScans: { type: 'number', default: 0, readOnly: true, hidden: true },
+      // Consecutive scans that reported this anomaly (reset by a clean scan); the auto work order rule reads it.
+      scansSeen: { type: 'number', default: 0, readOnly: true, hidden: true },
       investigation: { type: 'mixed', readOnly: true, hidden: true },
       notes: { type: 'text' },
     },

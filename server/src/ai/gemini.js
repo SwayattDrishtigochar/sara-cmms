@@ -22,7 +22,7 @@ const RETRY_MAX_SEC = 10;
 let client = null;
 let injected = null;
 
-/** Deterministic mock instead of Gemini: AI_MOCK=true or no key. An injected test client always runs "for real". */
+/** Scripted responses instead of Gemini (mock = scripted stand-in): AI_MOCK=true or no key. An injected test client always runs "for real". */
 export const isMock = () => !injected && (env.AI_MOCK || !env.GEMINI_API_KEY);
 
 export const getClient = () => {
@@ -31,9 +31,9 @@ export const getClient = () => {
   return client;
 };
 
-/** Tests: a fake `{ models: { generateContent, generateContentStream, list } }` in place of the SDK; null restores it. */
-export const _setClient = (fake) => {
-  injected = fake ?? null;
+/** Tests: a stand-in `{ models: { generateContent, generateContentStream, list } }` in place of the SDK; null restores it. */
+export const _setClient = (client) => {
+  injected = client ?? null;
 };
 
 /** Seconds from the `"retryDelay": "12s"` in a 429 body, or null when the error carries none. */

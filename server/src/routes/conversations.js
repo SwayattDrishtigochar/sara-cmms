@@ -56,12 +56,14 @@ const publicConversation = (c) => ({
   plantId: c.plantId ? String(c.plantId) : null,
   lastMessageAt: c.lastMessageAt,
   createdAt: c.createdAt,
+  voice: Boolean(c.voice),
 });
 
 /** A stored message for the UI: parts and blocks, no raw Gemini contents or CSV payloads. */
 const publicMessage = (m) => ({
   id: String(m._id),
   role: m.role,
+  channel: m.channel ?? 'text',
   text: m.text,
   context: m.context,
   parts: (m.parts ?? []).map(({ csv: _csv, ...part }) => part),

@@ -318,7 +318,8 @@ export const Gantt = ({ data, compact = false, now, selectedId, onBarClick, clas
   const hoverDelay = hover && delayOf(hover, data.delays);
 
   return (
-    <div className={className}>
+    // isolate: the sticky label column (z-20) must not paint over sticky bars outside the chart (Create plan).
+    <div className={cn('isolate', className)}>
       <div className="overflow-x-auto rounded-lg border border-border scrollbar-thin">
         <div className="flex" style={{ minWidth: compact ? 420 : 680 }}>
           <div

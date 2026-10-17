@@ -1,7 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { Router } from 'express';
 import { stillSignedIn } from '../auth/middleware.js';
-import { ParameterSpec } from '../db/models/Sim.js';
+import { ParameterSpec } from '../db/models/ParameterSpec.js';
 import { badRequest } from '../lib/errors.js';
 import { subscribe } from '../lib/events.js';
 import { openSse } from '../lib/sse.js';

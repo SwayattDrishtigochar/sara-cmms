@@ -4,7 +4,7 @@ import { getModule } from '../modules/registry.js';
 import { latestValues } from './queries.js';
 
 /**
- * Feeds /api/live from the databases. The simulator writes MongoDB and InfluxDB directly, so every
+ * Feeds /api/live from the databases. The devices write MongoDB and InfluxDB directly, so every
  * 3 s, for each company somebody watches, this reads the newest InfluxDB readings and the MongoDB
  * changes since its last look and publishes them as live events for the record's plant.
  *
@@ -18,7 +18,7 @@ const WARM_MS = 3 * LIVE_TICK_MS;
 /** The first look reaches back far enough to know every field's last reading; later looks only the recent ones. */
 const PRIME_LOOKBACK = '-7d';
 const TICK_LOOKBACK = '-2m';
-/** Writers' clocks differ (the simulator follows MongoDB's), so each look re-reads this far back and skips what it saw. */
+/** Writers' clocks differ (the telemetry source follows MongoDB's), so each look re-reads this far back and skips what it saw. */
 const LAG_MS = 60_000;
 const ASSETS_PER_QUERY = 100;
 const CHANGES_PER_LOOK = 500;

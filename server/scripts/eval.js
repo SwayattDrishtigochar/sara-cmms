@@ -668,7 +668,7 @@ const CASES = [
     name: 'P5-1 plan 5000 Housing-A by 25 Oct (confirm)',
     demo: true,
     text: 'Plan 5000 parts of Housing-A due 25 Oct',
-    tools: ['plan_production', 'apply_plan'],
+    tools: ['plan_production', 'check_plan', 'apply_plan'],
     blocks: ['plan', 'confirm'],
     confirm: true,
     after: ['apply_plan'],
@@ -682,7 +682,18 @@ const CASES = [
     blocks: ['plan', 'confirm'],
     confirm: true,
     after: ['apply_plan'],
-    mentions: /Applied \*\*PLN-\d+\*\*: 1 created/,
+    // The fixture's PM falls due at a fixed date: near it the recommendation becomes the move option (more records).
+    mentions: /Applied \*\*PLN-\d+\*\*: \d+ created/,
+  },
+  {
+    name: 'P7-1 maintenance plan for the whole plant (confirm)',
+    demo: true,
+    text: 'Maintenance plan for the whole plant next 30 days',
+    tools: ['plan_maintenance', 'apply_plan'],
+    blocks: ['plan', 'confirm'],
+    confirm: true,
+    after: ['apply_plan'],
+    mentions: /Applied \*\*PLN-\d+\*\*: \d+ created/,
   },
   {
     name: 'P5-3 cost alert for Compressor 2 (confirm)',

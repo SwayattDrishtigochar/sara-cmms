@@ -128,8 +128,14 @@ compared with the right baseline. Slope = least squares over the 1-minute means,
 
 ```js
 export const startAnomalyWatch = () => stopFn;             // setInterval(tickSec); one company at a time; never overlapping (per-company lock)
-export const scanCompany = async (companyId, { force = false, reason = 'tick' } = {}) => ({ reviewed, anomalies, skipped, model, mock });
+export const scanCompany = async (companyId, { force = false, reason = 'tick' } = {}) =>
+  ({ reviewed, total, flagged, anomalies, created, updated, reopened, resolved, notified, dropped, skipped,
+     skippedReasons: { off, quiet }, model, mock, summary /* one plain sentence, shown by "Scan now" */ });
 ```
+
+Every scan also writes a compact record to the capped collection `ai_scan_log` (`scanLog.js`): the flagged
+assets' table rows, the model's decisions for non-normal assets, the dropped claims with reasons, and the
+stats. It never contains the key. Read a miss with `db.ai_scan_log.find().sort({ $natural: -1 }).limit(5)`.
 
 Per company per tick:
 1. `computeFeatures`. An asset is **due** when: it has flags, or an open anomaly, or it was last reviewed more
@@ -149,9 +155,13 @@ Per company per tick:
          "parameters": [ { "field": "…", "observed": 0, "expected": 0, "deviation": "+4.2σ" } ],
          "explanation": "…", "likelyCauses": ["…"], "recommendedActions": ["…"], "urgencyHours": 0 } ] } ] }
    ```
-5. Guardrails (`guardrails.js`, pure + unit-tested): drop assets not in the input; drop parameters whose field
-   is not in that asset's table or whose `observed` differs from the table's last/mean by > 15 %; drop
-   anomalies left with no parameters; clamp scores; `watch` never notifies.
+5. Guardrails (`guardrails.js`, pure + unit-tested): `applyGuardrails(response, features)` → `{ assets, dropped }`.
+   Drop assets not in the input; match a parameter's `field` to the asset's table by key or label, with or
+   without a `(unit)` suffix, case-insensitively (the table prints the bare key and keeps the unit in the label
+   column); drop parameters whose `observed` differs from the table's last/mean by > 15 %; drop anomalies left
+   with no parameters; `info` severity never opens an anomaly and type `other` needs high confidence; clamp
+   scores; `watch` never notifies. Every drop carries a reason (`unknown_asset`, `unknown_field`,
+   `observed_mismatch`, `no_parameters`, `info_severity`, `unconfident_other`), is logged and lands in `ai_scan_log`.
 6. Effects: `assets.healthScore/healthSummary/healthUpdatedAt`; anomalies upserted by (assetId, type) while
    `state ∈ {open, acknowledged}` (update severity up, lastSeenAt, parameters, confidence); a resolved one of the
    same (asset, type) within 6 h is **reopened**; new ones get `detectedAt`, `model`, code via
@@ -176,6 +186,8 @@ Stored on `anomaly.investigation` with `{ model, at, evidence: { fields, series 
 
 ### Ground truth scoring (superadmin only)
 
+> Moved to the simulator in phase 7 (`sara-simulator/src/ui/scoring.js`, `GET /api/events` of its control panel).
+
 `GET /api/admin/sim/events` gains `detection: { anomalyId, code, detectedAt, latencySec, matchedFields[] } | null`
 — the first anomaly on the same asset detected after `startedAt` whose parameters intersect the scenario's
 `affects`. The AI never reads `simevents`.
@@ -189,7 +201,7 @@ Stored on `anomaly.investigation` with `{ model, at, evidence: { fields, series 
 | `GET /api/admin/ai/models` | superAdmin | `{ models: [...listModels()], tiers }` |
 | `POST /api/admin/ai/test` | superAdmin | `{ ok, model, latencyMs, text, error }` — tiny prompt via `generate({ purpose: 'test' })` |
 | `GET /api/admin/ai/usage` | superAdmin | `{ day, models: usageToday() }` |
-| `POST /api/ai/scan` | owner/admin of the company | `{ reviewed, anomalies }` — `scanCompany(ctx.companyId, { force: true, reason: 'manual' })` |
+| `POST /api/ai/scan` | owner/admin of the company | the full `scanCompany` result (incl. `summary`) — `scanCompany(ctx.companyId, { force: true, reason: 'manual' })` |
 | `GET /api/ai/health?assetId=` | any user (asset access via records.get) | `{ asset: { healthScore, healthSummary, healthUpdatedAt }, anomalies: [open + last 10 resolved] }` |
 | `POST /api/anomalies/:id/investigate` | owner/admin/technician with assets.update | `{ investigation }` |
 | `POST /api/anomalies/:id/state` | same | body `{ state: acknowledged\|resolved\|false_positive, note? }` → `{ anomaly }` (via records.update) |

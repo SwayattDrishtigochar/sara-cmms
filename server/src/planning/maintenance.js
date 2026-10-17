@@ -23,7 +23,7 @@ const DONE = ['Completed', 'Closed'];
 const ACTIVE_ANOMALY = ['open', 'acknowledged'];
 const PRIORITY_RANK = { High: 0, Medium: 1, Low: 2 };
 const SEVERITY_PRIORITY = { critical: 'High', warning: 'Medium', info: 'Low' };
-/** Default work order duration per category when it has no estimate (the simulator's table). */
+/** Default work order duration per category when it has no estimate (the telemetry source's table). */
 export const CATEGORY_MIN = {
   Breakdown: 90,
   Preventive: 60,
@@ -77,7 +77,12 @@ export const maintenanceTasks = async (ctx, input = {}, now = new Date()) => {
           'workorders',
           target
             ? byId(workOrderId, 'Work order')
-            : { ...where('asset'), workStatus: { $nin: DONE }, plannedStart: null },
+            : {
+                ...where('asset'),
+                workStatus: { $nin: DONE },
+                // Unscheduled, or its window passed and nobody started it (a missed window is re-planned).
+                $or: [{ plannedStart: null }, { workStatus: 'Open', plannedEnd: { $lt: now } }],
+              },
         ),
   ]);
   if (target === 'anomaly') {
@@ -554,17 +559,20 @@ const recommend = (task, options) => {
   );
 };
 
-/** Options for one task on its machine. */
-const optionsFor = (calendar, machines, task, { now, staff }) => {
+/**
+ * Options for one task on its machine. A free window before the deadline is the only option unless
+ * `allOptions` (an objective that weighs urgency): then insert/move compete with it.
+ */
+const optionsFor = (calendar, machines, task, { now, staff, allOptions = false }) => {
   const machine = machines.get(String(task.assetId));
   if (!machine) return [];
   const avail = staff ?? machine.working;
   const seconds = Math.max(1, task.durationMin) * 60;
   const free = firstWindow(machine.bookings, avail, now, calendar.end, seconds);
-  if (free && ms(free.end) <= ms(task.deadline)) {
-    return [option('zero_impact', 'Free window, no production impact', task, free)];
-  }
-  const options = [];
+  const inTime = free && ms(free.end) <= ms(task.deadline);
+  const zero = inTime ? [option('zero_impact', 'Free window, no production impact', task, free)] : [];
+  if (inTime && !allOptions) return zero;
+  const options = [...zero];
   const open = subtractIntervals(
     intersectIntervals([{ start: now, end: calendar.end }], avail),
     heldBy(machine),
@@ -584,7 +592,7 @@ const optionsFor = (calendar, machines, task, { now, staff }) => {
     const moved = moveOption(calendar, machines, machine, task, block, now);
     if (moved) options.push(moved);
   }
-  if (free) {
+  if (free && !inTime) {
     const late = hoursOf(Math.max(0, ms(free.end) - ms(task.deadline)));
     options.push(
       option('defer', 'Defer to the next free window', task, free, {
@@ -611,13 +619,14 @@ const commit = (machines, task, chosen) => {
 
 /**
  * Pure planner. `staff` = intervals with maintenance people on shift (shifts − breaks); absent → machine working time.
- * `choose(task, options)` picks the option booked before the next task (default: the recommendation).
+ * `choose(task, options)` picks the option booked before the next task (default: the recommendation);
+ * `allOptions` also offers insert/move when a free window exists (for a `choose` that weighs urgency).
  * @returns {{ tasks: [{ task, options: MaintenanceOption[], recommended: string|null }] }}
  */
 export const planMaintenance = (
   calendar,
   tasks,
-  { now = calendar.now ?? new Date(), staff, choose = recommend } = {},
+  { now = calendar.now ?? new Date(), staff, choose = recommend, allOptions = false } = {},
 ) => {
   const machines = new Map(calendar.machines.map((m) => [String(m.assetId), structuredClone(m)]));
   // A work order being re-planned frees its current window.
@@ -625,7 +634,7 @@ export const planMaintenance = (
   for (const m of machines.values()) m.bookings = m.bookings.filter((b) => !replanned.has(String(b.id)));
   return {
     tasks: tasks.map((task) => {
-      const options = optionsFor(calendar, machines, task, { now: new Date(now), staff });
+      const options = optionsFor(calendar, machines, task, { now: new Date(now), staff, allOptions });
       const chosen = choose(task, options);
       if (chosen) commit(machines, task, chosen);
       return { task, options, recommended: chosen?.id ?? null };
@@ -700,7 +709,7 @@ export const planMaintenanceProposal = async (ctx, input = {}, { now = new Date(
   const horizonDays = input.horizonDays ?? 7;
   const tasks = await maintenanceTasks(ctx, input, now);
   if (!tasks.length) {
-    throw badRequest(`Nothing to plan: no maintenance is due in the next ${horizonDays} days`);
+    throw badRequest(`Nothing to plan: everything due in the next ${horizonDays} days is already scheduled`);
   }
   const plant = plantOf(ctx, tasks[0].plantId ?? input.plantId);
   const plantTasks = tasks.filter((t) => String(t.plantId) === String(plant?._id));

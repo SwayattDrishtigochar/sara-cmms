@@ -416,10 +416,24 @@ const kpiChangeFlow = (s) => {
 
 // ---------- planning
 
-const planText = (r) => {
-  const cards = r.jobCards.map(
+const VERDICT_WORD = { doable: 'Doable', adjust: 'Needs adjustment', not_doable: 'Not doable' };
+const verdictLine = (c, fallback) =>
+  `**${VERDICT_WORD[c.verdict] ?? 'Doable'}:** ${c.issues?.length ? c.issues.slice(0, 3).join(' ') : fallback}${
+    c.adjustments?.length
+      ? `\n\n**Suggested:** ${c.adjustments
+          .slice(0, 2)
+          .map((a) => a.label)
+          .join('; ')}.`
+      : ''
+  }`;
+const notDoableTail = (r, tab) =>
+  `\n\nI won't create it like this. Open [${r.code} in the Planner](/planner?tab=${tab}&proposal=${r.proposalId}) to apply a suggestion, or tell me what to change.`;
+
+/** The plan_production result, with the check_plan verdict, issues and operators when there is one. */
+const planText = (r, checked = r) => {
+  const cards = (checked.jobCards ?? r.jobCards).map(
     (j) =>
-      `- **${j.asset}**: ${lakh(j.target)} pcs with ${j.tool}${j.setupMin ? ` after a ${j.setupMin} min changeover` : ''}, ${j.start} → ${j.end}`,
+      `- **${j.asset}**: ${lakh(j.target)} pcs with ${j.tool}${j.setupMin ? ` after a ${j.setupMin} min changeover` : ''}, ${j.start} → ${j.end}${j.operators?.length ? ` · ${list(j.operators)}` : ''}`,
   );
   const head = r.feasible
     ? `**${r.code}** makes the due date: ${r.jobCards.length} job card${r.jobCards.length === 1 ? '' : 's'}, finishing ${r.projectedFinish}, ${hours(r.slackHours)} before ${r.dueDate}.`
@@ -427,7 +441,31 @@ const planText = (r) => {
   const risks = r.risks.length ? `\n\n**Watch:** ${r.risks.slice(0, 2).join('; ')}.` : '';
   const alts =
     !r.feasible && r.alternatives.length ? `\n\n**Options:** ${r.alternatives.slice(0, 2).join(' ')}` : '';
-  return `${head}\n\n${cards.join('\n')}${risks}${alts}\n\nConfirm below to create the production plan and job cards.`;
+  const verdict = verdictLine(checked, 'machines, moulds, operators and the due date all check out.');
+  return `${head}\n\n${cards.join('\n')}\n\n${verdict}${risks}${alts}${
+    checked.verdict === 'not_doable'
+      ? notDoableTail(r, 'production')
+      : '\n\nConfirm below to create the production plan and job cards.'
+  }`;
+};
+
+/** A whole maintenance plan (plan_maintenance with scope): tasks, technicians and production impact. */
+const maintenancePlanText = (r) => {
+  const m = r.metrics ?? {};
+  const rows = r.tasks
+    .slice(0, 6)
+    .map(
+      (t) =>
+        `- **${t.title}** · ${t.asset}: ${t.start} → ${t.end} · ${t.technician ?? 'no technician free'}${t.zeroImpact ? ' · no production impact' : ` · moves ${hours(t.impactHours)} of production`}${t.late ? ' · late' : ''}`,
+    );
+  const more = r.tasks.length > 6 ? `\n- …and ${r.tasks.length - 6} more on the plan above` : '';
+  const head = `**${r.code}** · ${r.name}: ${r.tasks.length} task${r.tasks.length === 1 ? '' : 's'}, ${m.zeroImpactTasks ?? 0} with no production impact. Production moved: **${hours(m.productionHoursLost)}** instead of ${hours(m.naiveProductionHoursLost)} if everything ran as soon as possible, ${inr(m.downtimeCostAvoided)} of downtime cost avoided.`;
+  const verdict = verdictLine(r, 'every task has a window and a technician on shift.');
+  return `${head}\n\n${rows.join('\n')}${more}\n\n${verdict}${
+    r.verdict === 'not_doable'
+      ? notDoableTail(r, 'maintenance')
+      : '\n\nConfirm below to create the maintenance plan and its work orders.'
+  }`;
 };
 
 const appliedText = (r) => {
@@ -491,30 +529,63 @@ const productionFlow = (s) => {
       text: `${errorText(err) ?? 'I could not plan that.'}${parts?.length ? ` Parts I can plan: ${list(parts)}.` : ''}`,
     };
   }
-  return applyStep(s, planned, planText(planned));
+  if (!s.has('check_plan'))
+    return step(
+      `**Checking ${planned.code}**\n\ncheck_plan re-checks every machine window, mould, operator shift and the due date before you confirm.`,
+      call('check_plan', { proposalId: planned.proposalId, edits: {} }),
+    );
+  const checked = s.result('check_plan');
+  if (!checked) return { text: errorText(s.last('check_plan')) ?? 'I could not check that plan.' };
+  const text = planText(planned, checked);
+  return checked.verdict === 'not_doable' ? { text } : applyStep(s, planned, text);
 };
+
+const WHOLE_PLAN =
+  /\bmaintenance plan\b|\b(?:whole|entire) plant\b|\ball (?:the )?(?:machines|assets)\b|\bplant[- ]wide\b/;
+const objectiveIn = (t) =>
+  /\b(fix (?:it |them )?fast|asap|as soon as possible|urgent)\b/.test(t)
+    ? 'fix_fast'
+    : /\bbalanced?\b/.test(t)
+      ? 'balanced'
+      : 'protect_production';
 
 const maintenanceFlow = (s) => {
   const anomaly = codeIn(s.text, 'ANM');
   const workOrder = codeIn(s.text, 'WO');
   const name = anomaly || workOrder ? null : assetIn(s.text);
+  // A whole plan (plant, or the named machine) unless one anomaly / work order / machine window is asked for.
+  const whole = !anomaly && !workOrder && (WHOLE_PLAN.test(s.t) || !name || !/\b(?:window|slot)\b/.test(s.t));
   if (name && !s.has('resolve'))
     return step(`**Finding ${name}**`, call('resolve', { kind: 'asset', query: name }));
   if (name && !matchOf(s, name)) return { text: `I couldn't find a machine called "${name}".` };
   if (!s.has('plan_maintenance')) {
     const asset = machineId(s, name);
-    const what = anomaly ?? workOrder ?? machineName(s, name) ?? 'every task due in the plant';
+    const horizonDays = /\b(\d{1,2}) days\b/.exec(s.t) ? Number(/\b(\d{1,2}) days\b/.exec(s.t)[1]) : 7;
+    if (whole)
+      return step(
+        `**Planning maintenance for ${asset ? machineName(s, name) : 'the whole plant'}**\n\nplan_maintenance gathers every PM, calibration, anomaly and open work order due in the next ${horizonDays} days, puts each in the window that costs production least and picks a technician on shift.`,
+        call('plan_maintenance', {
+          ...(asset ? { scope: 'assets', assetIds: [asset] } : { scope: 'plant' }),
+          horizonDays,
+          objective: objectiveIn(s.t),
+        }),
+      );
+    const what = anomaly ?? workOrder ?? machineName(s, name);
     return step(
       `**Looking for a window**\n\nplan_maintenance looks for a free slot for ${what} before its deadline, and otherwise for the cheapest way to push production.`,
       call('plan_maintenance', {
         ...(anomaly ? { anomaly } : workOrder ? { workOrder } : asset ? { asset } : {}),
-        horizonDays: /\b(\d{1,2}) days\b/.exec(s.t) ? Number(/\b(\d{1,2}) days\b/.exec(s.t)[1]) : 7,
+        horizonDays,
       }),
     );
   }
   const planned = s.result('plan_maintenance');
   if (!planned)
     return { text: errorText(s.last('plan_maintenance')) ?? 'I could not plan that maintenance.' };
+  if (planned.kind === 'maintenance_plan') {
+    const text = maintenancePlanText(planned);
+    return planned.verdict === 'not_doable' ? { text } : applyStep(s, planned, text);
+  }
   const options = planned.options.map(
     (o) =>
       `- **${o.label}**${o.id === planned.recommended ? ' (recommended)' : ''}: ${o.start} → ${o.end}${
@@ -1318,8 +1389,77 @@ const recordFlow = (s) => {
   };
 };
 
+// ---------- opening pages (F3: open_page)
+
+const NAV = /^(?:please\s+|sara,?\s+)?(?:open|go to|take me to|navigate to|show me|show)\b/;
+/**
+ * Questions that want numbers or charts, not a page, even when they start with "show me"; and "open a work
+ * order for Press 1: oil leak" / "open 2 work orders: …", which create (createWoFlow), never navigate.
+ */
+const NOT_NAV =
+  /\b(trend|plot|chart|graph|energy|kwh|cost(?!s? (?:page|overview))|spend|downtime|why|health|how many|count|summar|work orders? for|new (?:work ?order|breakdown))\b|:\s*\S/;
+const NAV_PAGES = [
+  [/\banomal/, { page: 'anomalies' }],
+  [/\bplanner\b|\bplanning\b/, { page: 'planner' }],
+  [/\bkpis?\b|\bdashboard\b/, { page: 'kpis' }],
+  [/\bcosts?\b/, { page: 'costs' }],
+  [/\bhome\b|\bcommand cent/, { page: 'home' }],
+  [/\bmachines\b/, { page: 'machines' }],
+];
+const NAV_MODULES = [
+  [/\bwork ?orders?\b/, 'workorders'],
+  [/\bjob ?cards?\b/, 'jobcards'],
+  [/\bspare ?parts?\b|\bspares\b/, 'spareparts'],
+  [/\bproduction plans?\b/, 'productionplans'],
+  [/\btools?\b/, 'tools'],
+  [/\busers?\b|\bpeople\b/, 'users'],
+  [/\bplants?\b/, 'plants'],
+];
+const navFilters = (t) => {
+  const filters = [];
+  if (/\bhigh\b/.test(t)) filters.push({ field: 'priority', value: 'High' });
+  if (/\blow\b/.test(t)) filters.push({ field: 'priority', value: 'Low' });
+  if (/\bcompleted\b/.test(t)) filters.push({ field: 'workStatus', value: 'Completed' });
+  if (/\bcritical\b/.test(t)) filters.push({ field: 'severity', value: 'critical' });
+  return filters;
+};
+/** open_page args for a navigation request, or null when no page, list or machine is named. */
+const navTarget = (s) => {
+  if (!NAV.test(s.t) || NOT_NAV.test(s.t)) return null;
+  const asset = assetIn(s.text);
+  const page = NAV_PAGES.find(([re]) => re.test(s.t))?.[1];
+  if (page?.page === 'planner') {
+    return asset
+      ? { page: 'planner', tab: 'maintenance', assetId: asset }
+      : { page: 'planner', tab: /\bmaintenance\b/.test(s.t) ? 'maintenance' : 'production' };
+  }
+  if (page?.page === 'anomalies') {
+    const filters = navFilters(s.t).filter((f) => f.field === 'severity');
+    return {
+      page: 'anomalies',
+      ...(asset ? { assetId: asset } : {}),
+      ...(filters.length ? { filters } : {}),
+    };
+  }
+  if (page) return page;
+  const module = NAV_MODULES.find(([re]) => re.test(s.t))?.[1];
+  if (module) {
+    const filters = navFilters(s.t).filter((f) => module === 'workorders' || f.field !== 'workStatus');
+    return { page: 'list', module, ...(filters.length ? { filters } : {}) };
+  }
+  if (asset) return { page: 'machine', recordId: asset };
+  const wo = codeIn(s.text, 'WO');
+  return wo ? { page: 'record', module: 'workorders', recordId: wo } : null;
+};
+const navigateFlow = (s) => {
+  if (!s.has('open_page')) return step(null, call('open_page', navTarget(s)));
+  const r = s.result('open_page') ?? {};
+  return { text: `Opened **${r.label ?? 'the page'}** on your screen.` };
+};
+
 const HELP = `I'm SARA running in mock mode (AI_MOCK=true: no Gemini call is made), so I answer from scripted demo flows on your real data. Try:
 - Plan 5000 Housing-A by 25 Oct
+- Maintenance plan for the whole plant next 7 days
 - Plan maintenance for Press 1
 - Alert me if Compressor 2 energy cost is above ₹3000 a day
 - Build a heatmap of compressor energy by hour
@@ -1334,6 +1474,7 @@ const FLOWS = [
     (s) => /^(hi|hello|hey|good (morning|afternoon|evening)|thanks|thank you|ok|okay)\b/.test(s.t),
     () => ({ text: `Hello! ${HELP.replace(/^I'm SARA/, 'I am SARA')}` }),
   ],
+  [(s) => Boolean(navTarget(s)), navigateFlow],
   [
     (s) =>
       /\b(alert|notify|warn|tell|ping) me\b|\bcost alert\b|\bset (?:up )?an? (?:cost )?alert\b/.test(s.t),
@@ -1400,7 +1541,7 @@ export const demoStep = ({ text, history = [], system }) => {
   if (!demoChat.enabled) return null;
   const s = stateOf(String(text ?? ''), callsOf(history), system);
   const failed = s.lastStep.find(
-    (c) => c.response?.error && !['plan_production', 'apply_plan'].includes(c.name),
+    (c) => c.response?.error && !['plan_production', 'check_plan', 'apply_plan'].includes(c.name),
   );
   if (failed) {
     const r = failed.response;

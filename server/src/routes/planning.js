@@ -2,7 +2,6 @@ import { Router } from 'express';
 import { DateTime } from 'luxon';
 import { z } from 'zod';
 import { labelsFor, zoneOf } from '../agent/tools/common.js';
-import { AiUnavailableError } from '../ai/gemini.js';
 import { badRequest, forbidden, parseOrThrow } from '../lib/errors.js';
 import { logger } from '../lib/logger.js';
 import { OBJECT_ID_PATTERN } from '../modules/fields.js';
@@ -11,6 +10,7 @@ import { getModule } from '../modules/registry.js';
 import { buildCalendar, calendarToGantt, hoursOf } from '../planning/capacity.js';
 import { explainProposal } from '../planning/explain.js';
 import { canPlanProduction, proposeProduction } from '../planning/production.js';
+import { checkProductionPlan, editedFromProposal, editedPlanSchema } from '../planning/productionCheck.js';
 import {
   applyProposal,
   discardProposal,
@@ -21,7 +21,7 @@ import {
 import { dueDateOf } from '../planning/tools.js';
 import { aiUnavailable } from './ai.js';
 
-/** Capacity calendar, production planning and plan proposals (phase 5 §6); mounted at /api. */
+/** Capacity calendar, production planning, plan checks and proposals (phase 5 §6, phase 7 §6); mounted at /api. */
 export const planningRouter = Router();
 
 const DAY = 86_400_000;
@@ -40,9 +40,13 @@ const productionBody = z.object({
   toolIds: z.array(objectId).max(5).optional(),
   start: z.coerce.date().optional(),
   plantId: objectId.optional(),
+  customerId: objectId.optional(),
   rejectionPct: z.number().min(0).max(50).optional(),
 });
-const applyBody = z.object({ option: z.enum(['zero_impact', 'insert', 'move', 'defer']).optional() });
+const applyBody = z.object({
+  option: z.enum(['zero_impact', 'insert', 'move', 'defer']).optional(),
+  force: z.boolean().optional(),
+});
 
 planningRouter.get('/planning/calendar', async (req, res) => {
   const q = parseOrThrow(calendarQuery, req.query, 'calendar range');
@@ -69,19 +73,22 @@ planningRouter.post('/planning/production', async (req, res) => {
     throw forbidden('Your role or company plan does not allow production planning');
   const input = parseOrThrow(productionBody, req.body, 'production plan');
   const proposal = await proposeProduction(req.ctx, { ...input, dueDate: dueDateOf(req.ctx, input.dueDate) });
-  let aiError;
-  try {
-    proposal.explanation = await explainProposal(req.ctx, proposal);
-  } catch (err) {
-    // The plan stands without its explanation; the page shows the deterministic feasibility note.
-    const ai = err instanceof AiUnavailableError;
-    if (!ai) logger.warn({ err }, 'plan explanation failed');
-    proposal.explanation = null;
-    aiError = ai
-      ? { code: err.code, message: err.message }
-      : { code: 'AI_ERROR', message: 'The AI explanation is unavailable right now' };
-  }
-  res.json({ proposal, plan: await planBlockFor(req.ctx, proposal), ...(aiError ? { aiError } : {}) });
+  // The fresh plan goes through the same check as an edited one: issues, adjustments, ghost bars and the
+  // plan_feasibility explanation (stored on the proposal; AI failure → aiError, never a failed page).
+  const { proposal: checked, ...check } = await checkProductionPlan(req.ctx, editedFromProposal(proposal));
+  res.json({
+    proposal: checked ?? proposal,
+    plan: check.plan,
+    check,
+    ...(check.aiError ? { aiError: check.aiError } : {}),
+  });
+});
+
+planningRouter.post('/planning/production/check', async (req, res) => {
+  if (!canPlanProduction(req.ctx))
+    throw forbidden('Your role or company plan does not allow production planning');
+  const edited = parseOrThrow(editedPlanSchema, req.body, 'edited plan');
+  res.json(await checkProductionPlan(req.ctx, edited));
 });
 
 planningRouter.get('/planning/proposals', async (req, res) => {
@@ -95,9 +102,9 @@ planningRouter.get('/planning/proposals/:id', async (req, res) => {
 });
 
 planningRouter.post('/planning/proposals/:id/apply', async (req, res) => {
-  const { option } = parseOrThrow(applyBody, req.body ?? {}, 'apply request');
+  const { option, force } = parseOrThrow(applyBody, req.body ?? {}, 'apply request');
   try {
-    res.json(await applyProposal(req.ctx, req.params.id, { option }));
+    res.json(await applyProposal(req.ctx, req.params.id, { option, force }));
   } catch (err) {
     // The updated plan the Planner switches to gets its explanation like any new plan (best effort).
     if (err.code === 'PLAN_CHANGED') {
@@ -147,7 +154,9 @@ planningRouter.get('/planning/parts', async (req, res) => {
         toolNumber: t.toolNumber ?? null,
         name: t.name,
         status: t.status,
-        assets: (t.assets ?? []).map((a) => labels.get(String(a))).filter(Boolean),
+        assets: (t.assets ?? [])
+          .map((a) => ({ id: String(a), label: labels.get(String(a)) }))
+          .filter((a) => a.label),
       });
     }
   }

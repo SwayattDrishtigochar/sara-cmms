@@ -18,10 +18,10 @@ import {
   writePoints,
 } from '../src/config/influx.js';
 import { Baseline } from '../src/db/models/Baseline.js';
-import { ParameterSpec } from '../src/db/models/Sim.js';
+import { ParameterSpec } from '../src/db/models/ParameterSpec.js';
 import { getModule } from '../src/modules/registry.js';
-import { generateAccount } from '../src/sim/accountGenerator.js';
 import { PASSWORD, setupDatabase, teardownDatabase } from './helpers/db.js';
+import { seedCompany } from './helpers/fixtures.js';
 
 const MIN = 60_000;
 const influxUp = influxEnabled && (await pingInflux()) === 'up';
@@ -50,7 +50,7 @@ describe.skipIf(!influxUp)('baselines and features against InfluxDB', () => {
   beforeAll(async () => {
     await setupDatabase();
     clearBaselineCache();
-    const account = await generateAccount({
+    const account = await seedCompany({
       name: 'Anomaly Works',
       slug,
       domain: 'anomaly.test',

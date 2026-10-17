@@ -2,7 +2,7 @@ import { DateTime } from 'luxon';
 import { z } from 'zod';
 import { env } from '../../config/env.js';
 import { influxEnabled, queryRows } from '../../config/influx.js';
-import { ParameterSpec } from '../../db/models/Sim.js';
+import { ParameterSpec } from '../../db/models/ParameterSpec.js';
 import { badRequest } from '../../lib/errors.js';
 import { shiftAt } from '../../lib/shifts.js';
 import { records } from '../../modules/records.js';

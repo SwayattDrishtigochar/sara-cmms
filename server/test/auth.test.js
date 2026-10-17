@@ -1,17 +1,7 @@
-import bcrypt from 'bcryptjs';
 import request from 'supertest';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
-import { env } from '../src/config/env.js';
-import { getModule } from '../src/modules/registry.js';
-import { superadminUsesDemoPassword } from '../src/sim/platform.js';
 import { PASSWORD, setupDatabase, teardownDatabase } from './helpers/db.js';
-
-// Before env.js loads: the demo login panel on, and a superadmin password apart from the demo one.
-vi.hoisted(() => {
-  process.env.DEMO_MODE = 'true';
-  process.env.SUPERADMIN_PASSWORD = 'Admin@Test-2026';
-});
 
 let app;
 beforeAll(async () => {
@@ -50,6 +40,12 @@ describe('auth', () => {
     expect((await request(app).get('/api/m/assets')).status).toBe(401);
   });
 
+  it('never lists accounts or passwords', async () => {
+    const res = await request(app).get('/api/auth/demo-accounts');
+    expect([401, 404]).toContain(res.status);
+    expect(res.body.accounts).toBeUndefined();
+  });
+
   it('serves module metadata and lists with filters', async () => {
     const login = await request(app)
       .post('/api/auth/login')
@@ -63,43 +59,5 @@ describe('auth', () => {
       .set(auth);
     expect(list.status).toBe(200);
     expect(list.body.items.every((w) => w.priority === 'High')).toBe(true);
-  });
-});
-
-describe('demo accounts', () => {
-  it('lists only simulated companies, never the platform tenant, a superadmin or its password', async () => {
-    const acme = await getModule('companies').Model.findOne({ name: 'Acme Components' }).lean();
-    await getModule('users').Model.create({
-      companyId: acme._id,
-      firstName: 'Hidden',
-      email: 'hidden_superadmin@acme.test',
-      password: await bcrypt.hash('Whatever@123', 4),
-      role: 'superAdmin',
-    });
-    const res = await request(app).get('/api/auth/demo-accounts');
-    expect(res.status).toBe(200);
-    expect(res.body.accounts.map((a) => a.company).sort()).toEqual(['Acme Components', 'Beta Foods']);
-    expect(res.body.accounts.every((a) => a.password === env.SIM_DEFAULT_PASSWORD)).toBe(true);
-    const users = res.body.accounts.flatMap((a) => a.users);
-    expect(users.some((u) => u.role === 'superAdmin')).toBe(false);
-    const text = JSON.stringify(res.body);
-    expect(text).not.toContain(env.SUPERADMIN_EMAIL);
-    expect(text).not.toContain(env.SUPERADMIN_PASSWORD);
-    expect(text).not.toContain('Swayatt Platform');
-  });
-
-  it('knows when the superadmin could sign in with the demo password', async () => {
-    expect(await superadminUsesDemoPassword()).toBe(false);
-    const hash = await bcrypt.hash(env.SIM_DEFAULT_PASSWORD, 4);
-    await getModule('users').Model.updateOne({ email: env.SUPERADMIN_EMAIL }, { $set: { password: hash } });
-    expect(await superadminUsesDemoPassword()).toBe(true);
-  });
-
-  it('withholds the demo password while the superadmin could sign in with it', async () => {
-    const res = await request(app).get('/api/auth/demo-accounts');
-    expect(res.status).toBe(200);
-    expect(res.body.accounts.length).toBeGreaterThan(0);
-    expect(res.body.accounts.every((a) => a.password === '')).toBe(true);
-    expect(JSON.stringify(res.body)).not.toContain(env.SIM_DEFAULT_PASSWORD);
   });
 });

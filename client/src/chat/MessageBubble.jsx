@@ -3,6 +3,7 @@ import {
   CircleStop,
   Info,
   Link2,
+  Mic,
   RefreshCw,
   RotateCcw,
   Sparkles,
@@ -10,11 +11,10 @@ import {
 } from 'lucide-react';
 import { memo, useMemo } from 'react';
 import { BlockRenderer } from '../blocks/BlockRenderer.jsx';
-import { cn } from '../lib/format.js';
+import { cn, humanize } from '../lib/format.js';
 import { Markdown } from '../lib/markdown.jsx';
 import { idOf } from '../store/streamStore.js';
 import { CopyButton } from '../superadmin/parts.jsx';
-import { humanize } from '../superadmin/simUtils.js';
 import { modelLine, ThinkingPanel } from './ThinkingPanel.jsx';
 import { ToolTrace } from './ToolTrace.jsx';
 
@@ -75,6 +75,12 @@ const UserBubble = ({ message }) => {
   return (
     <div className="flex flex-col items-end gap-1 animate-fade-in">
       <div className="max-w-[85%] rounded-2xl rounded-br-md border border-brand/15 bg-brand-soft px-3.5 py-2 text-sm leading-relaxed whitespace-pre-wrap break-words text-fg">
+        {message.channel === 'voice' && (
+          <>
+            <Mic className="mr-1.5 inline size-3.5 align-[-2px] text-ai" aria-hidden />
+            <span className="sr-only">Spoken: </span>
+          </>
+        )}
         {message.text}
       </div>
       {about && (

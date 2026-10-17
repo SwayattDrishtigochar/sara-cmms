@@ -1,9 +1,8 @@
 import { Brain, ChevronRight } from 'lucide-react';
 import { useState } from 'react';
-import { cn, formatDuration } from '../lib/format.js';
+import { cn, formatDuration, humanize } from '../lib/format.js';
 import { Markdown } from '../lib/markdown.jsx';
 import { useNow } from '../superadmin/parts.jsx';
-import { humanize } from '../superadmin/simUtils.js';
 
 /** Seconds a message has been (or was) working: live while streaming, else its stored latency. */
 export const elapsedOf = (message, now = Date.now()) => {

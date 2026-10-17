@@ -73,7 +73,7 @@ const GROUP_HINTS = {
   people: /\b(check(ed)?[ -]?in|attendance|breaks?|who came|present today)\b/,
   write: WRITE,
   planning:
-    /\b(plan(s|ning)?|schedul(e|ed|ing)|capacity|gantt|maintenance window|slots?|due (by|on)|deliver|when can)\b/,
+    /\b(plan(s|ning)?|schedul(e|ed|ing)|capacity|gantt|maintenance window|maintenance plan|production plan|operators?|technicians?|doable|slots?|due (by|on)|deliver|when can)\b/,
   // ₹ is not a word character, so it sits outside the \b group.
   cost: /₹|\b(costs?|spend|spent|rupees|budget|expensive|tariff|alert me)\b/,
   kpi: /\b(kpis?|dashboard|heatmap|gauge|metric card|build a (chart|graph|card))\b/,

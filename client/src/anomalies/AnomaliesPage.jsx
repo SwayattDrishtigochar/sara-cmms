@@ -10,7 +10,7 @@ import { useUi } from '../store/ui.js';
 import { Button, Card, EmptyState, PageHeader, Skeleton } from '../ui/core.jsx';
 import { Input, Select } from '../ui/form.jsx';
 import { AnomalyDetail } from './AnomalyDetail.jsx';
-import { assetOf, ParamChip, StateBadge, severityOf, typeLabel } from './parts.jsx';
+import { AutoWorkOrderBadge, assetOf, ParamChip, StateBadge, severityOf, typeLabel } from './parts.jsx';
 import { invalidateAnomalies, useScan } from './useAnomalies.js';
 
 const STATES = [
@@ -69,11 +69,11 @@ const Row = ({ anomaly, onOpen }) => {
   const s = severityOf(anomaly.severity);
   const machine = assetOf(anomaly);
   return (
-    <li>
+    <li className="transition-colors hover:bg-surface-2/70 has-[button:focus-visible]:bg-surface-2">
       <button
         type="button"
         onClick={() => onOpen(anomaly._id)}
-        className="flex w-full gap-3 px-4 py-3 text-left transition-colors hover:bg-surface-2/70 focus-visible:bg-surface-2 focus-visible:outline-none"
+        className="flex w-full gap-3 px-4 py-3 text-left focus-visible:outline-none"
       >
         <span
           className={cn('mt-0.5 grid size-8 shrink-0 place-items-center rounded-lg border', s.soft)}
@@ -87,7 +87,7 @@ const Row = ({ anomaly, onOpen }) => {
             <span className="text-sm font-semibold text-fg">{machine.name}</span>
             {machine.tag && <span className="font-mono text-xs text-subtle">{machine.tag}</span>}
             <span className="text-sm text-muted">{typeLabel(anomaly.type)}</span>
-            <span className="ml-auto flex items-center gap-2">
+            <span className="ml-auto flex flex-wrap items-center gap-2">
               <StateBadge state={anomaly.state} />
               <span className="whitespace-nowrap text-xs text-subtle">
                 {formatRelative(anomaly.detectedAt)}
@@ -115,6 +115,8 @@ const Row = ({ anomaly, onOpen }) => {
           )}
         </span>
       </button>
+      {/* A link may not sit inside the row button: kept outside so it is focusable on its own. */}
+      <AutoWorkOrderBadge anomaly={anomaly} className="mb-3 ml-15 mr-4 -mt-1" />
     </li>
   );
 };

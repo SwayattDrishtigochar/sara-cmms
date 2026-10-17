@@ -84,7 +84,14 @@ export default [
     // Every field is engine-managed (planning/proposals.js writes the Model directly).
     fields: {
       proposalCode: { type: 'string', readOnly: true, label: 'Plan #' },
-      kind: { type: 'enum', values: ['production', 'maintenance'], required: true, readOnly: true },
+      // production = part/quantity/due plan; maintenance = one task with push options; maintenance_plan = a
+      // scope/horizon package of tasks with technicians (phase 7).
+      kind: {
+        type: 'enum',
+        values: ['production', 'maintenance', 'maintenance_plan'],
+        required: true,
+        readOnly: true,
+      },
       title: { type: 'string', readOnly: true },
       status: { type: 'enum', values: PROPOSAL_STATUSES, default: 'draft', readOnly: true },
       scheduleVersion: { type: 'number', readOnly: true, hidden: true },
@@ -92,6 +99,7 @@ export default [
       input: { type: 'mixed', readOnly: true, hidden: true },
       horizon: { type: 'object', readOnly: true, fields: { start: { type: 'date' }, end: { type: 'date' } } },
       productionPlanId: { type: 'ref', ref: 'productionplans', readOnly: true, label: 'Production plan' },
+      maintenancePlanId: { type: 'ref', ref: 'maintenanceplans', readOnly: true, label: 'Maintenance plan' },
       anomalyId: { type: 'ref', ref: 'anomalies', readOnly: true, label: 'Anomaly' },
       assetIds: { type: 'refs', ref: 'assets', readOnly: true, label: 'Machines' },
       ops: {
@@ -117,6 +125,7 @@ export default [
         readOnly: true,
         fields: {
           feasible: { type: 'boolean' },
+          verdict: { type: 'enum', values: ['doable', 'adjust', 'not_doable'] },
           dueDate: { type: 'date' },
           projectedFinish: { type: 'date' },
           slackHours: { type: 'number', unit: 'h' },
@@ -125,6 +134,11 @@ export default [
           notes: { type: 'text' },
         },
       },
+      // Phase 7: the last check of the (possibly edited) plan: Issue[] and Adjustment[] (§3.4), and the
+      // maintenance plan's metrics (§3.6). Mixed: the engines own the shapes.
+      issues: { type: 'mixed', readOnly: true, hidden: true },
+      adjustments: { type: 'mixed', readOnly: true, hidden: true },
+      metrics: { type: 'mixed', readOnly: true, hidden: true },
       risks: {
         type: 'array',
         readOnly: true,

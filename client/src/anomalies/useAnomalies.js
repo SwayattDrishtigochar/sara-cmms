@@ -56,9 +56,12 @@ export const useScan = () => {
     mutationFn: () => api('/ai/scan', { method: 'POST', body: {} }),
     onSuccess: (r) => {
       toast.success(`SARA reviewed ${plural(r?.reviewed ?? 0, 'machine')}`, {
-        description: r?.anomalies
-          ? `${plural(r.anomalies, 'anomaly', 'anomalies')} need attention.`
-          : 'Nothing out of the ordinary.',
+        description:
+          r?.summary ??
+          (r?.anomalies
+            ? `${plural(r.anomalies, 'anomaly', 'anomalies')} need attention.`
+            : 'Nothing out of the ordinary.'),
+        duration: 8000,
       });
       return invalidateAnomalies(qc);
     },

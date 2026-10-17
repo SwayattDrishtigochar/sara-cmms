@@ -7,12 +7,24 @@ import { moduleIcon } from '../lib/icons.js';
 import { Avatar, Button, Card, CardHeader, EmptyState, Skeleton } from '../ui/core.jsx';
 import { Field, Textarea } from '../ui/form.jsx';
 import { Dialog, Sheet } from '../ui/overlay.jsx';
+import { EXTRA_CHILDREN, EXTRA_COVERS, RECORD_EXTRAS } from './extras.jsx';
 import { emptyValue, FieldInput, fromFormValue, isWide } from './FieldInput.jsx';
 import { FieldValue } from './FieldValue.jsx';
 import { RecordForm } from './RecordForm.jsx';
+import { RelatedRecords } from './RelatedRecords.jsx';
 import { useDeleteRecord, useModuleMeta, useRecord, useRecordAction } from './useModules.js';
 
 const SIDE_KEYS = new Set(['plantId', 'comments']);
+
+/** Null, '', [] or an object whose values are all empty: nothing worth a card. */
+export const isEmptyValue = (v) =>
+  v == null ||
+  v === '' ||
+  (Array.isArray(v)
+    ? v.length === 0
+    : typeof v === 'object' &&
+      Object.getPrototypeOf(v) === Object.prototype &&
+      Object.values(v).every(isEmptyValue));
 
 const ActionDialog = ({ meta, action, record, onClose }) => {
   const [values, setValues] = useState(() =>
@@ -106,7 +118,7 @@ export const RecordPage = () => {
 
   const sections = useMemo(() => {
     if (!meta) return { scalar: [], wide: [] };
-    const shownInHeader = new Set([meta.codeField, meta.titleField]);
+    const shownInHeader = new Set([meta.codeField, meta.titleField, ...(EXTRA_COVERS[meta.name] ?? [])]);
     const visible = meta.fields.filter(
       (f) => !f.hidden && !f.secret && !SIDE_KEYS.has(f.key) && !shownInHeader.has(f.key),
     );
@@ -124,6 +136,7 @@ export const RecordPage = () => {
   if (isError) return <EmptyState title="Can't open this record">{error.message}</EmptyState>;
 
   const Icon = moduleIcon(meta.icon);
+  const Extra = RECORD_EXTRAS[meta.name];
   const code = meta.codeField ? record[meta.codeField] : null;
   const title = meta.name === 'users' ? refLabel(record) : (record[meta.titleField] ?? refLabel(record));
   const badges = meta.fields.filter((f) => f.type === 'enum' && meta.list.includes(f.key) && record[f.key]);
@@ -177,7 +190,7 @@ export const RecordPage = () => {
         </div>
       </div>
 
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_340px]">
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div className="space-y-5">
           {sections.scalar.length > 0 && (
             <Card>
@@ -195,7 +208,7 @@ export const RecordPage = () => {
             </Card>
           )}
           {sections.wide
-            .filter((f) => record[f.key] != null && !(Array.isArray(record[f.key]) && !record[f.key].length))
+            .filter((f) => !isEmptyValue(record[f.key]))
             .map((f) => (
               <Card key={f.key}>
                 <CardHeader title={f.label} />
@@ -204,6 +217,10 @@ export const RecordPage = () => {
                 </div>
               </Card>
             ))}
+          {Extra && <Extra record={record} />}
+          {meta.children?.length > 0 && (
+            <RelatedRecords meta={meta} record={record} hide={EXTRA_CHILDREN[meta.name]} />
+          )}
         </div>
 
         <div className="space-y-5">

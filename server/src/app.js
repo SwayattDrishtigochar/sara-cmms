@@ -19,7 +19,6 @@ export const createApp = ({ routers = [] } = {}) => {
   app.set('query parser', 'extended');
   app.set('trust proxy', 1);
   app.disable('x-powered-by');
-  console.log('env.CLIENT_URL', env.CLIENT_URL);
   app.use(helmet());
   app.use(cors({ origin: env.CLIENT_URL.split(',').map((o) => o.trim()) }));
   app.use(

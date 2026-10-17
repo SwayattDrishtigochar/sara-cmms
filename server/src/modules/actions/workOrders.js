@@ -22,7 +22,7 @@ const automate = (ctx, comment, at = new Date()) => ({
   createdAt: at,
 });
 
-/** A work order raised for an anomaly links back to it and acknowledges it (as the simulator's managers do). */
+/** A work order raised for an anomaly links back to it and acknowledges it (as the managers do). */
 const linkAnomaly = async (ctx, doc, svc) => {
   const Anomaly = svc.getModule('anomalies').Model;
   const where = { _id: doc.anomalyId, companyId: ctx.companyId };

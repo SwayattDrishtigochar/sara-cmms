@@ -563,3 +563,39 @@ describe('pages mount', () => {
     vi.unstubAllGlobals();
   });
 });
+
+describe('voice in chat', () => {
+  it('marks voice conversations and spoken messages with a mic', async () => {
+    const { ConversationList } = await import('./ConversationList.jsx');
+    const { MessageBubble } = await import('./MessageBubble.jsx');
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, enabled: false } } });
+    const at = new Date().toISOString();
+    qc.setQueryData(['conversations'], {
+      pages: [
+        {
+          items: [
+            { id: 'a'.repeat(24), title: 'Machines running now', voice: true, lastMessageAt: at },
+            { id: 'b'.repeat(24), title: 'Typed chat', voice: false, lastMessageAt: at },
+          ],
+          nextCursor: null,
+        },
+      ],
+      pageParams: [undefined],
+    });
+    render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <MemoryRouter>
+            <ConversationList />
+            <MessageBubble
+              message={{ id: 'u1', role: 'user', channel: 'voice', text: 'How many?', parts: [] }}
+            />
+            <MessageBubble message={{ id: 'u2', role: 'user', channel: 'text', text: 'Typed', parts: [] }} />
+          </MemoryRouter>
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+    expect(screen.getAllByRole('img', { name: 'Voice conversation' })).toHaveLength(1);
+    expect(screen.getAllByText('Spoken:')).toHaveLength(1);
+  });
+});

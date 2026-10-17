@@ -1,5 +1,6 @@
 import { CircleAlert, IndianRupee, Info, Sparkles } from 'lucide-react';
 import { useState } from 'react';
+import { useSearchParams } from 'react-router';
 import { useSession } from '../auth/useAuth.js';
 import { KpiBlock } from '../blocks/KpiBlock.jsx';
 import { cn, formatMoney, formatNumber, getFormatPrefs } from '../lib/format.js';
@@ -116,7 +117,11 @@ const driversOf = (overview, assetRows) => {
 export const CostsPage = () => {
   const ctx = useSession();
   const manager = ['owner', 'admin'].includes(ctx?.role);
-  const [period, setPeriod] = useState('month');
+  // `?period=week` (e.g. from the assistant's open_page tool) picks the starting preset.
+  const [search] = useSearchParams();
+  const [period, setPeriod] = useState(() =>
+    PERIODS.some((p) => p.id === search.get('period')) ? search.get('period') : 'month',
+  );
   const [custom, setCustom] = useState(() => {
     const today = todayIso();
     return { start: `${today.slice(0, 8)}01`, stop: today };

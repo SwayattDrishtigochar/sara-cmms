@@ -1,6 +1,6 @@
 /**
  * Static telemetry vocabulary shared by queries, the live poller, the UI and the agent.
- * Per-type machine fields and their normal bands come from the simulator (it upserts
+ * Per-type machine fields and their normal bands come from the telemetry source (it upserts
  * parameterspecs at start); energy fields are fixed (CMMS energy meters).
  */
 
@@ -54,7 +54,7 @@ export const SHOT_FIELDS = [
   { field: 'stoppedTime', unit: 's', aggregate: 'sum' },
 ];
 
-/** Headline parameters per asset type (machine cards, default chart series). Field names match the simulator. */
+/** Headline parameters per asset type (machine cards, default chart series). Field names match the devices' telemetry. */
 export const KEY_FIELDS = {
   'Injection Moulding Machine': ['oilTempPv', 'injectionPressure', 'cycleTime'],
   'Power Press': ['press_speed', 'load_monitor', 'vibration'],

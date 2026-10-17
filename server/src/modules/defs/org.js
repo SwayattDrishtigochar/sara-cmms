@@ -65,7 +65,6 @@ export default [
       companyPhoneNumber: { type: 'string' },
       companyContactPerson: { type: 'string' },
       domain: { type: 'string', readOnly: true, help: 'Email domain of the generated users' },
-      isSimulated: { type: 'boolean', readOnly: true, default: false },
       isPlatform: { type: 'boolean', readOnly: true, hidden: true, default: false },
       subscription: {
         type: 'object',
@@ -205,6 +204,10 @@ export default [
     sort: 'firstName',
     indexes: [[{ email: 1 }, { unique: true }]],
     hooks: userHooks,
+    children: [
+      { module: 'workorders', field: 'people', label: 'Work orders' },
+      { module: 'jobcards', field: 'assignedTo', label: 'Job cards' },
+    ],
     fields: {
       firstName: { type: 'string', required: true },
       lastName: { type: 'string' },

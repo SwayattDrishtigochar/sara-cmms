@@ -1,5 +1,5 @@
 import { DateTime } from 'luxon';
-import { ParameterSpec } from '../db/models/Sim.js';
+import { ParameterSpec } from '../db/models/ParameterSpec.js';
 import { records } from '../modules/records.js';
 import { getModule, labelOf, moduleDigest } from '../modules/registry.js';
 import { ENERGY_FIELDS, SHOT_FIELDS, STATUSES } from '../telemetry/catalog.js';
@@ -21,6 +21,7 @@ const PLANS = [
   '"create a work order for X, high priority, due tomorrow, assign to Y" → resolve asset + resolve user + resolve_time_range (one step) → create_record { module: "workorders", items: [{ name, asset, priority, dueDate, people }] }.',
   '"mark WO-42 completed, note …" → update_work_order_status { workOrder: "WO-42", workStatus: "Completed", note }.',
   '"plan 5000 Housing-A by 25 Oct" → plan_production { part, quantity, dueDate } (maintenance: plan_maintenance { asset | anomaly }) → explain the plan → apply_plan { proposalId } so the user confirms. Never create planned job cards or work orders with create_record; KPI cards only through create_kpi / update_kpi.',
+  'Plans: plan_production / plan_maintenance (scope + objective for a whole plan), check_plan after the user edits, then apply_plan.',
   'Follow-ups ("and last week?", "only plant Pune", "sort by cost", "export that") reuse the entities and filters of the previous turn; "export that" = export_csv with the sourceRef of the latest rows.',
 ];
 

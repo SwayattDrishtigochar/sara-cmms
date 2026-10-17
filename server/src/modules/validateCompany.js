@@ -10,7 +10,7 @@ const COMPANY_WIDE = new Set(['users', 'notifications', 'kpis', 'costalerts']);
 const MAX_DETAILS = 1000;
 
 /**
- * Checks every document of a company the way SARA reads it — what raw writers such as the simulator
+ * Checks every document of a company the way SARA reads it — what raw writers such as the telemetry source
  * must get right: registry schema validation (`new Model(doc).validateSync()`), a plantId on
  * plant-scoped records, documents that belong to no company, and counters behind the highest code
  * in use (the next record would repeat a number). Fields SARA does not know are warnings.

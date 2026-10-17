@@ -28,6 +28,18 @@ export const useAssistant = create((set) => ({
   setConversationId: (conversationId) => set({ conversationId }),
 }));
 
+/**
+ * Opens an app page SARA chose (open_page): app-relative paths only, through the router so the page keeps
+ * its state. The drawer closes so the page is visible; the voice panel stays (it docks itself).
+ */
+export const goTo = (url) => {
+  const path = String(url ?? '');
+  if (!path.startsWith('/') || path.startsWith('//')) return false;
+  useAssistant.setState({ isOpen: false, context: null });
+  import('../routes.jsx').then(({ router }) => router.navigate(path));
+  return true;
+};
+
 /** Chat context of a route: Machine 360 and record pages point SARA at that record. */
 export const contextFromPath = (pathname) => {
   const machine = /^\/machines\/([^/]+)/.exec(pathname);

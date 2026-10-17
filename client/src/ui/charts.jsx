@@ -36,7 +36,7 @@ export const seriesColor = (slot) => `var(--series-${slot + 1})`;
 
 /**
  * Machine status marks. Running recedes and stops stay loud (calm control room); the opacities also keep
- * every status pair apart under protan/deutan simulation (ΔE ≥ 8), which the raw tokens alone do not.
+ * every status pair apart for protan/deutan colour vision (ΔE ≥ 8), which the raw tokens alone do not.
  */
 export const STATUS_STYLE = {
   Running: { color: 'var(--running)', opacity: 0.5, icon: CirclePlay },

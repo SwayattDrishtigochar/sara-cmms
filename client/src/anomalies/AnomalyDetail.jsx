@@ -24,6 +24,7 @@ import { AiProvenance, Badge, Button, Card, EmptyState, Skeleton } from '../ui/c
 import { Field, Input, Select, Textarea } from '../ui/form.jsx';
 import { Dialog, Sheet } from '../ui/overlay.jsx';
 import {
+  AutoWorkOrderBadge,
   assetOf,
   deviationOf,
   Markdown,
@@ -45,10 +46,18 @@ export const evidenceWindow = (detectedAt, now = Date.now()) => {
   return { start: detected - WINDOW_MS, stop: Math.min(now, detected + WINDOW_MS), detected };
 };
 
-const Stat = ({ label, children }) => (
-  <div className="min-w-0">
+/** `wrap`: the value may take a second line (link + badge) instead of being cut to one. */
+const Stat = ({ label, children, wrap = false, className }) => (
+  <div className={cn('min-w-0', className)}>
     <dt className="text-[11px] text-subtle">{label}</dt>
-    <dd className="truncate text-sm font-medium text-fg">{children}</dd>
+    <dd
+      className={cn(
+        'text-sm font-medium text-fg',
+        wrap ? 'flex flex-wrap items-center gap-x-1.5 gap-y-1' : 'truncate',
+      )}
+    >
+      {children}
+    </dd>
   </div>
 );
 
@@ -579,13 +588,14 @@ const Body = ({ anomaly }) => {
           <Stat label="Type">{typeLabel(anomaly.type)}</Stat>
           {anomaly.acknowledgedBy && <Stat label="Acknowledged by">{refLabel(anomaly.acknowledgedBy)}</Stat>}
           {anomaly.workOrderId && (
-            <Stat label="Work order">
+            <Stat label="Work order" wrap className="col-span-2">
               <Link
                 to={`/m/workorders/${anomaly.workOrderId._id ?? anomaly.workOrderId}`}
-                className="text-brand hover:underline"
+                className="min-w-0 truncate text-brand hover:underline"
               >
                 {refLabel(anomaly.workOrderId)}
               </Link>
+              <AutoWorkOrderBadge anomaly={anomaly} />
             </Stat>
           )}
         </dl>

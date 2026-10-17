@@ -1,6 +1,6 @@
 const HMS = { pattern: '^\\d{2,}:[0-5]\\d:[0-5]\\d$', patternMessage: 'use HH:MM:SS' };
 
-/** Who came to work and when, plus their breaks (written by the simulator; CMMS checkinouts/userbreaktimes). */
+/** Who came to work and when, plus their breaks (written by the attendance devices; CMMS checkinouts/userbreaktimes). */
 const attendance = {
   group: 'Organisation',
   plantScoped: true,

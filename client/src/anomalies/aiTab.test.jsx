@@ -17,7 +17,14 @@ const fx = vi.hoisted(() => ({
     limits: { 'gemini-3.8-flash': { rpm: 10, rpd: 250 } },
     chatReservePct: 40,
     showThoughts: true,
-    anomaly: { enabled: true, tickSec: 60, quietIntervalMin: 30, alwaysAskAi: false, investigate: true },
+    anomaly: {
+      enabled: true,
+      tickSec: 60,
+      quietIntervalMin: 30,
+      alwaysAskAi: false,
+      investigate: true,
+      autoWorkOrder: { enabled: true, afterScans: 2, minSeverity: 'warning' },
+    },
     costWatch: { enabled: true, intervalMin: 60 },
     kpiInsightTtlMin: 30,
     briefingTtlHours: 6,
@@ -146,13 +153,18 @@ describe('Superadmin → AI', () => {
     fireEvent.change(screen.getByLabelText('gemini-3.8-flash requests per day'), {
       target: { value: '1000' },
     });
+    const autoWo = screen.getByRole('switch', { name: 'Open a work order automatically' });
+    expect(autoWo.checked).toBe(true);
+    fireEvent.click(autoWo);
+    fireEvent.change(screen.getByLabelText('After consecutive scans'), { target: { value: '3' } });
+    fireEvent.change(screen.getByLabelText('Minimum severity'), { target: { value: 'critical' } });
 
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await vi.waitFor(() => expect(sent('PUT', '/admin/ai')).toBeTruthy());
     expect(sent('PUT', '/admin/ai')).toMatchObject({
       tiers: { fast: { model: 'gemini-3.1-pro-preview', thinkingLevel: 'low' } },
       chatReservePct: 50,
-      anomaly: { enabled: false },
+      anomaly: { enabled: false, autoWorkOrder: { enabled: false, afterScans: 3, minSeverity: 'critical' } },
       limits: { 'gemini-3.8-flash': { rpm: 10, rpd: 1000 } },
     });
     expect(await screen.findByText('AI settings saved')).toBeTruthy();

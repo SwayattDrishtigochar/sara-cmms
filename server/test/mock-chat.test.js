@@ -41,6 +41,110 @@ describe('mock chat update and delete', () => {
   });
 });
 
+describe('mock chat plans', () => {
+  const turn = (name, args, result) => [
+    { role: 'model', parts: [{ functionCall: { name, args } }] },
+    { role: 'user', parts: [{ functionResponse: { name, response: { result } } }] },
+  ];
+  const planned = {
+    proposalId: 'p1',
+    code: 'PLN-3',
+    verdict: 'adjust',
+    feasible: true,
+    dueDate: '26-10-2026 23:59',
+    projectedFinish: '23-10-2026 10:00',
+    slackHours: 85,
+    shortfall: 0,
+    jobCards: [{ key: 'op-1', asset: 'IMM 5', tool: 'T-103', target: 5000, start: 'a', end: 'b' }],
+    risks: [],
+    alternatives: [],
+  };
+  const text = 'Plan 5000 parts of Housing-A due 26 Oct';
+
+  it('checks a production plan before applying it, and never applies a not-doable one', () => {
+    const plan = turn('plan_production', {}, planned);
+    expect(demoStep({ text, history: plan }).calls).toEqual([
+      { name: 'check_plan', args: { proposalId: 'p1', edits: {} } },
+    ]);
+    const check = (verdict) => ({
+      proposalId: 'p1',
+      code: 'PLN-3',
+      verdict,
+      issues: verdict === 'doable' ? [] : ['IMM 5 is booked by JC-19 until 18-10 00:00.'],
+      adjustments:
+        verdict === 'doable' ? [] : [{ id: 'adj-1', kind: 'move_start', label: 'Start after JC-19' }],
+      jobCards: [{ ...planned.jobCards[0], operators: ['Ravi Prasad', 'Sachin Pawar'] }],
+    });
+    const ok = demoStep({ text, history: [...plan, ...turn('check_plan', {}, check('doable'))] });
+    expect(ok.calls).toEqual([{ name: 'apply_plan', args: { proposalId: 'p1' } }]);
+    expect(ok.text).toMatch(/\*\*Doable:\*\*/);
+    expect(ok.text).toMatch(/Ravi Prasad and Sachin Pawar/);
+    const bad = demoStep({ text, history: [...plan, ...turn('check_plan', {}, check('not_doable'))] });
+    expect(bad.calls).toBeUndefined();
+    expect(bad.text).toMatch(/\*\*Not doable:\*\* IMM 5 is booked/);
+    expect(bad.text).toMatch(/Start after JC-19/);
+    expect(bad.text).toMatch(/\/planner\?tab=production&proposal=p1/);
+  });
+
+  it('makes a whole-plant maintenance plan and applies it', () => {
+    const t = 'Maintenance plan for the whole plant next 7 days';
+    expect(demoStep({ text: t, history: [] }).calls).toEqual([
+      {
+        name: 'plan_maintenance',
+        args: { scope: 'plant', horizonDays: 7, objective: 'protect_production' },
+      },
+    ]);
+    const result = {
+      proposalId: 'm1',
+      code: 'PLN-5',
+      kind: 'maintenance_plan',
+      name: 'Maintenance plan – Pune',
+      verdict: 'doable',
+      metrics: {
+        tasks: 1,
+        zeroImpactTasks: 1,
+        productionHoursLost: 0,
+        naiveProductionHoursLost: 2,
+        downtimeCostAvoided: 9000,
+      },
+      tasks: [
+        {
+          key: 't-1',
+          title: 'PM-4 Monthly',
+          asset: 'IMM 6',
+          start: 'a',
+          end: 'b',
+          technician: 'Ramesh Kumar',
+          impactHours: 0,
+          zeroImpact: true,
+          late: false,
+        },
+      ],
+      issues: [],
+    };
+    const next = demoStep({ text: t, history: turn('plan_maintenance', {}, result) });
+    expect(next.calls).toEqual([{ name: 'apply_plan', args: { proposalId: 'm1' } }]);
+    expect(next.text).toMatch(/Ramesh Kumar · no production impact/);
+    expect(next.text).toMatch(/₹9,000 of downtime cost avoided/);
+    expect(demoStep({ text: 'Plan maintenance for Press 1', history: [] }).calls[0].name).toBe('resolve');
+    // A named machine gets its own plan (technicians, impact); a "window" asks for the single slot.
+    const press = turn(
+      'resolve',
+      { kind: 'asset', query: 'Press 1' },
+      { matches: [{ id: 'a1', label: 'PRS-01 · Press 1' }] },
+    );
+    expect(demoStep({ text: 'Plan maintenance for Press 1 this week', history: press }).calls).toEqual([
+      {
+        name: 'plan_maintenance',
+        args: { scope: 'assets', assetIds: ['a1'], horizonDays: 7, objective: 'protect_production' },
+      },
+    ]);
+    expect(demoStep({ text: 'Find a maintenance window for Press 1', history: press }).calls[0].args).toEqual(
+      { asset: 'a1', horizonDays: 7 },
+    );
+  });
+});
+
 describe('mock chat refused tools', () => {
   const refused = (name) => [
     { role: 'model', parts: [{ functionCall: { name, args: {} } }] },

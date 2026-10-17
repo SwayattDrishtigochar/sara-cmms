@@ -1,8 +1,16 @@
 import { ArrowDown, ArrowUp, ArrowUpDown, Download, Table2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { cn, formatDateTime, formatNumber, refLabel } from '../lib/format.js';
+import {
+  cn,
+  downloadText,
+  formatDateTime,
+  formatNumber,
+  humanize,
+  refLabel,
+  slugify,
+  toDelimited,
+} from '../lib/format.js';
 import { CopyButton } from '../superadmin/parts.jsx';
-import { downloadText, humanize, slugify, toDelimited } from '../superadmin/simUtils.js';
 import { Button } from '../ui/core.jsx';
 
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;

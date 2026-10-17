@@ -20,7 +20,7 @@ Contracts in detail: `docs/simulator-v2.md` (simulator), `docs/phase2-contracts.
  │ sara-simulator (Node 22, systemd)     │                          │ Command Center · Machines · 360   │
  │  seed once (simstate marker)          │                          │ Anomalies · Planner · Costs · KPI │
  │  20 machines: physics + scenarios ────┼── line protocol (gzip) ─┐│ Chat + ⌘J drawer · Modules        │
- │  machine state (status, downtimes,    │                         ││ Superadmin: AI · Simulation       │
+ │  machine state (status, downtimes,    │                         ││ Superadmin: AI · Platform         │
  │    job counters, rejections) ─────────┼──┐                      │└──────▲────────────▲───────────────┘
  │  people (WOs, job cards, requests,    │  │                      │       │ REST       │ SSE: /api/live,
  │    PMs, stock, attendance) ───────────┼──┤                      │       │ (JWT)      │ chat messages
@@ -45,18 +45,18 @@ Contracts in detail: `docs/simulator-v2.md` (simulator), `docs/phase2-contracts.
 
 | Component | Where | Tech | Responsibility |
 |---|---|---|---|
-| Web app | `sara/client` | React 19, Vite 8, Tailwind 4, TanStack Query 5, zustand 5, react-router 7, recharts 3, radix-ui | Every page; generic module list/record/form pages from registry metadata; chat UI; live tiles |
-| API server | `sara/server` | Node 26, Express 5, Mongoose 8, zod 4, `@google/genai`, `@influxdata/influxdb-client`, pino | Auth, tenancy, records, live feed, AI layer, engines |
-| Simulator | `sara-simulator` | Node ≥ 22, `mongodb`, `luxon`, `bcryptjs` | Seeds one company once, streams 20 machines, simulates 28 people, applies superadmin injections |
+| Web app | `sara/client` | React 19, Vite 8, Tailwind 4, TanStack Query 5, zustand 5, react-router 7, recharts 3, radix-ui | Every page; generic module list/record/form pages from registry metadata; chat UI; voice panel (AudioWorklet mic, Web Audio player); live tiles |
+| API server | `sara/server` | Node 26, Express 5, Mongoose 8, zod 4, `@google/genai`, `ws`, `@influxdata/influxdb-client`, pino | Auth, tenancy, records, live feed, AI layer, voice proxy (`/api/voice`), engines |
+| Simulator | `sara-simulator` | Node ≥ 22, `mongodb`, `luxon`, `bcryptjs` | Seeds one company once, streams 20 machines, simulates 28 people, applies the injections from its own control panel (port 5090) |
 | MongoDB 8 | compose `mongo` | | All business records, simulator control plane, AI state (conversations, usage, anomalies), sessions |
 | InfluxDB 2.7 | compose `influxdb` | | Telemetry, one bucket per company (named by its id); measurements `machineParams`, `sensorData`, `energy`, `shotCountDetails`, `timelineData`, `qualityEvents` |
-| nginx | client image | nginx 1.29 | Serves the SPA with history fallback; proxies `/api`, unbuffered for `/api/live` and `/api/conversations` |
+| nginx | client image | nginx 1.29 | Serves the SPA with history fallback; proxies `/api`, unbuffered for `/api/live` and `/api/conversations`, WebSocket upgrade for `/api/voice` |
 
 **Server layout** (`server/src/`): `config/` (env, mongo, influx) · `auth/` · `context/` (request context:
 role, company, plant rule, modules) · `modules/` (registry, field types, `records.js`, permissions, actions) ·
 `routes/` · `telemetry/` (catalogue, Flux queries, live poller) · `ai/` (Gemini plumbing, budget, anomaly
-watch) · `agent/` (router, loop, tools, validators) · `engines/`, `kpis/`, `jobs/` (phase 5–6) · `sim/`
-(platform seed, superadmin simulation helpers).
+watch) · `agent/` (router, loop, tools, validators) · `voice/` (Gemini Live proxy, phase 8) · `engines/`, `kpis/`, `jobs/` (phase 5–6) · `planning/`
+(production and maintenance planners) · `platform/` (platform tenant, superadmin and indexes).
 
 ## 3. Data model
 
@@ -70,9 +70,10 @@ injects the tenant field, applies the plant rule, checks that every ref points i
 allocates per-company/per-plant codes (`WO-n`, `JC-n` …) with atomic counters, enforces permissions,
 soft-deletes, strips secrets, and supports `dryRun` (used to preview agent writes before Confirm).
 
-**Platform collections** (superadmin only, never given to the agent): `simcontrol`, `simevents`,
-`siminstances`, `simactivity`, `simstate`, `parameterspecs`, `baselines`, `platformsettings`, `sessions`,
-`counters`, `ai_conversations`, `ai_messages`, `ai_tool_audit`, `ai_usage`.
+**Platform collections** (superadmin only, never given to the agent): `parameterspecs`, `baselines`,
+`platformsettings`, `sessions`, `counters`, `ai_conversations`, `ai_messages`, `ai_texts`, `ai_tool_audit`,
+`ai_usage`. The simulator keeps its own control collections (`simcontrol`, `simevents`, `siminstances`,
+`simactivity`, `simstate`) in the same database; SARA never reads or writes them.
 
 ## 4. Data flow
 
@@ -109,24 +110,25 @@ Mongo changes since last look   ├─► livePoller (3 s, per company with list
 - The client parses SSE over `fetch` (so the Bearer header works), patches TanStack Query caches and shows
   toasts for anomalies and notifications addressed to the user.
 
-### 4.3 Superadmin → simulator (control plane in Mongo)
+### 4.3 Simulator control panel (control plane in Mongo)
 
-Superadmin → Simulation writes `simcontrol` (running, tick, human activity, speed 1–120×, respond to
-anomalies, backfill requests) and `simevents` (injections: asset, scenario, severity, ramp, hold). The
-simulator reads both every 3 s and writes its heartbeat to `siminstances` (online = seen within 15 s).
-There is no network path from SARA to the Pi: the Pi only needs outbound access to MongoDB and InfluxDB.
+The simulator serves its own password-protected control panel (port 5090, `SIM_UI_PASSWORD`). It writes
+`simcontrol` (running, tick, human activity, speed 1–120×, respond to anomalies, backfill requests) and
+`simevents` (injections: asset, scenario, severity, ramp, hold). The simulator reads both every 3 s and
+writes its heartbeat to `siminstances` (online = seen within 15 s). SARA has no simulator page or route:
+there is no network path from SARA to the Pi, which only needs outbound access to MongoDB and InfluxDB.
 
 ### 4.4 The closed loop (F8)
 
 ```
 inject bearing_wear on Press 1 ─► vibration ramps in the telemetry ─► anomaly watch flags it, Gemini names
-"vibration" ─► investigation + notification ─► WO (from the card, or chat, or the maintenance planner) ─►
+"vibration" ─► investigation + notification ─► WO (SARA opens it after 2 scans, or the card, chat, planner) ─►
 simulated technician completes it ─► injection cleared (clearedReason 'repair') ─► telemetry normal ─►
 3 clean scans ─► anomaly auto-resolves
 ```
 
-The detection scoreboard joins `simevents` (ground truth) with the first matching anomaly for latency and
-matched fields. The AI never reads `simevents`.
+The simulator panel's detection scoreboard joins `simevents` (ground truth) with the first matching anomaly
+for latency and matched fields. SARA and its AI never read `simevents`.
 
 ## 5. AI layer
 
@@ -215,6 +217,37 @@ on cause and fix per breach), the Command Center briefing (deterministic evidenc
 actions, evidence blocks; regenerated after 4 h or on demand) and planning explanations, all on the
 background tier and all under the budget ledger.
 
+### 5.7 Voice (Gemini Live proxy) (`voice/`, phase 8)
+
+```
+browser: mic → AudioWorklet (16 kHz PCM16, 40 ms frames) ─┐                ┌─► player (24 kHz PCM16, gapless)
+         captions, tool trace, blocks, Confirm cards ◄────┤ wss /api/voice ├── binary audio + JSON events
+                                                          ▼                │
+SARA server: start { JWT } → userFromToken → one session per user ─► Gemini Live (one connection per session;
+   system prompt = chat prompt + voice style + language, every permitted tool group, female prebuilt voice,
+   input/output transcription, VAD, context compression, resumption handle)
+   toolCall ─► execute(ctx) as in chat ─► audit ─► sendToolResponse      write ─► pending action ─► Confirm card
+   confirm_action (voice, a later turn) or Confirm click ─► claimPendingAction ─► execute ─► result spoken
+```
+
+- **Why a proxy:** the key never leaves the server; tools run with the user's `ctx`, permissions, audit and
+  pending actions; `usageMetadata` reaches the budget ledger; the mock plugs in at one point (`liveApi()`).
+  Rejected: ephemeral tokens with browser-direct Live (tool calls would land in the browser).
+- **Auth and limits:** the JWT rides in the first message (5 s deadline), Origin allow-list from `CLIENT_URL`,
+  re-checked every 60 s and at token expiry; 16 KiB frames, 100 messages/s, 6 starts/min/user, one session per
+  user, `maxConcurrent` server-wide, `maxSessionMin`, 90 s idle, heartbeat.
+- **Turns:** each voice turn is one user + one assistant `ai_messages` doc (`channel: 'voice'`, `tier: 'voice'`,
+  chat-shaped `parts` and replayable `gemini` contents) in a `voice: true` conversation, so Chat shows it and can
+  continue it by text. Writes follow chat's rule: preview → pending action → confirm by voice (`confirm_action`,
+  only the latest action and only from a later turn) or by click. Audio is relayed and counted, never stored.
+- **Budget:** each Live connection (resumption reconnects included) is one `canSpend(model, 'voice')` and one
+  `ai_usage` row (`purpose: 'voice'`, tokens, connect time, audio seconds); fallback model on refusal or failure.
+- **Resilience:** `goAway` or an unexpected Gemini close → one reconnect with the resumption handle (or a fresh
+  prompt from the stored turns) while ≤ 2 s of browser audio is buffered; the browser reconnects once after an
+  abnormal close (same conversation). Shutdown ends every session (`closed server_shutdown`) before the HTTP server.
+- **Mock (`ai/mockLive.js`):** the same Live messages from typed text: scripted flows over the real tools,
+  captions in chunks and a soft 220 Hz tone as speech; audio input is ignored.
+
 ## 6. Planning, cost and KPI engines (phase 5–6, in progress)
 
 Built as in the plan; the `engines/`, `kpis/` and `jobs/` folders are being filled now.
@@ -251,7 +284,7 @@ Built as in the plan; the `engines/`, `kpis/` and `jobs/` folders are being fill
   scope (validators re-inject the tenant into filters, pipelines and `$lookup`s); Flux is limited to the
   company's own bucket and `companyId` tag; the KPI runner uses the viewer's context. Tests assert that
   company A sees nothing of company B through any read tool, ref or `$lookup`.
-- **Roles:** superAdmin (platform tenant; AI and Simulation tabs), owner and admin (full), technician
+- **Roles:** superAdmin (platform tenant; AI and Platform tabs), owner and admin (full), technician
   (`permissions[module][action]`), view (read-only; every write refused, chat writes included). Only a
   superAdmin can grant superAdmin.
 - **Auth:** HS256 JWT carrying a session id; every request checks the session in Mongo (revocable, TTL

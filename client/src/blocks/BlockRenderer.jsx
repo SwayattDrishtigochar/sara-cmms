@@ -2,14 +2,14 @@ import { Braces } from 'lucide-react';
 import { Component } from 'react';
 import { ConfirmCard } from '../chat/ConfirmCard.jsx';
 import { KpiPreviewBlock } from '../kpis/KpiPreviewBlock.jsx';
-import { cn } from '../lib/format.js';
+import { cn, humanize } from '../lib/format.js';
 import { PlanBlock } from '../planner/PlanBlock.jsx';
 import { CopyButton } from '../superadmin/parts.jsx';
-import { humanize } from '../superadmin/simUtils.js';
 import { ChartBlock } from './ChartBlock.jsx';
 import { DataTable } from './DataTable.jsx';
 import { FileBlock } from './FileBlock.jsx';
 import { KpiBlock } from './KpiBlock.jsx';
+import { NavigateBlock } from './NavigateBlock.jsx';
 
 /** Any block the client does not know, shown as tidy JSON. */
 export const JsonBlock = ({ type, payload, note, className }) => {
@@ -88,6 +88,9 @@ export const BlockRenderer = ({ part, messageId, confirm }) => {
       break;
     case 'kpi':
       body = <KpiPreviewBlock payload={payload} />;
+      break;
+    case 'navigate':
+      body = <NavigateBlock id={id} {...payload} />;
       break;
     default:
       body = <JsonBlock type={type} payload={payload} />;

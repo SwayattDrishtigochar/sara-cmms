@@ -5,6 +5,7 @@ import { useSession } from '../auth/useAuth.js';
 import { useLiveConnection, useRecordSync } from '../live/liveStore.js';
 import { useUi } from '../store/ui.js';
 import { Sheet } from '../ui/overlay.jsx';
+import { VoicePanel } from '../voice/VoicePanel.jsx';
 import { Header } from './Header.jsx';
 import { Sidebar, SidebarContent } from './Sidebar.jsx';
 
@@ -25,6 +26,7 @@ export const AppShell = () => {
         <>
           <LiveConnection />
           <AssistantDrawer />
+          <VoicePanel />
           <CommandPalette />
         </>
       )}

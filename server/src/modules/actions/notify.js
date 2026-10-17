@@ -1,6 +1,6 @@
 /**
  * Creates an in-app notification. The live poller (telemetry/livePoller.js) delivers it to /api/live,
- * like the simulator's notifications, so a toast never shows twice.
+ * like the devices' notifications, so a toast never shows twice.
  * `svc` is the records service (passed in to avoid an import cycle).
  */
 export const notifyUsers = async (
