@@ -1,0 +1,56 @@
+# Cloud Build: the web app (client/) -> Cloud Run service sara-cmms-frontend.
+# Trigger "sara-cmms-frontend": push to main touching client/ or the workspace files, config client/cloudbuild.yaml.
+#
+# The browser calls the API service directly, so its address is baked in at build time (VITE_API_URL = _API_URL).
+# If the API moves (another service, a custom domain), change _API_URL here or in the trigger's substitutions,
+# and list this service's URLs in the API's CLIENT_URL (CORS and the voice WebSocket's Origin check).
+steps:
+  - id: Build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --tag=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA
+      - --file=client/Dockerfile
+      - --build-arg=VITE_API_URL=$_API_URL
+      - --build-arg=VITE_APP_NAME=$_APP_NAME
+      - --build-arg=NGINX_CONF=client/nginx.cloudrun.conf
+      - .
+  - id: Push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - $_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA
+  # Creates the service on the first run; later runs roll out a new revision with these settings.
+  - id: Deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - $_SERVICE_NAME
+      - --image=$_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA
+      - --region=$_DEPLOY_REGION
+      - --platform=$_PLATFORM
+      - --port=80
+      - --max-instances=3
+      - --labels=managed-by=gcp-cloud-build-deploy-cloud-run,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID,gcb-trigger-id=$_TRIGGER_ID
+      - --quiet
+images:
+  - $_AR_HOSTNAME/$_AR_PROJECT_ID/$_AR_REPOSITORY/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA
+substitutions:
+  _API_URL: https://sara-cmms-backend-653763853650.asia-south2.run.app
+  _APP_NAME: SARA
+  _SERVICE_NAME: sara-cmms-frontend
+  _DEPLOY_REGION: asia-south2
+  _PLATFORM: managed
+  _AR_HOSTNAME: asia-south2-docker.pkg.dev
+  _AR_PROJECT_ID: cmms-451505
+  _AR_REPOSITORY: cloud-run-source-deploy
+  _TRIGGER_ID: manual
+options:
+  substitutionOption: ALLOW_LOOSE
+  logging: CLOUD_LOGGING_ONLY
+tags:
+  - gcp-cloud-build-deploy-cloud-run
+  - gcp-cloud-build-deploy-cloud-run-managed
+  - sara-cmms-frontend

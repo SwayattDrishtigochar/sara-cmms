@@ -17,7 +17,10 @@ ARG VITE_APP_NAME=SARA
 RUN pnpm --filter @sara/client build
 
 FROM nginx:1.29-alpine
-COPY client/nginx.conf /etc/nginx/conf.d/default.conf
+# nginx.conf proxies /api to the compose `server` service. The Cloud Run build (client/cloudbuild.yaml)
+# passes NGINX_CONF=client/nginx.cloudrun.conf: static files only, the browser calls VITE_API_URL itself.
+ARG NGINX_CONF=client/nginx.conf
+COPY ${NGINX_CONF} /etc/nginx/conf.d/default.conf
 COPY --from=build /app/client/dist /usr/share/nginx/html
 EXPOSE 80
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
