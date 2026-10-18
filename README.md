@@ -309,26 +309,43 @@ nothing, by chat or voice included. The platform superadmin (`superadmin@swayatt
 ## Architecture
 
 ```
- Plant data gateways                              SARA server (Node 22+, Express 5)              Browser (React 19, Vite)
- ┌──────────────────────────────┐                ┌──────────────────────────────────┐          ┌──────────────────────┐
- │ machine telemetry every 5 s  │── telemetry ─┐ │ auth (JWT + sessions), records.js│◄──REST──►│ Command Center       │
- │   (PLC / SCADA / meters)     │              │ │ live poller → event bus ─────────┼──SSE────► Machines, Machine 360│
- │ plant activity: work orders, │── records ───┼─┤ engines: capacity, planners,     │          │ Anomalies, Planner   │
- │   job cards, requests, stock │              │ │   costs, KPI runner, briefing    │◄──WS────►│ Costs, KPI Builder   │
- └──────────────────────────────┘              │ │ AI: anomaly watch, investigations│  voice   │ Chat, Voice, modules │
-                                               │ │   chat + voice agents, insights  │          │ Superadmin           │
-                                               ▼ │   budget ledger                  │          └──────────────────────┘
-                              MongoDB (hosted)    └───────┬─────────────┬────────────┘
-                              records, AI state,  InfluxDB (hosted)     │
-                              sessions            bucket per company ◄──┘ reads both ──► Google Gemini API (+ Live API)
+ Plant floor              Edge: one gateway per asset        Google Cloud Run (managed)                      Browser
+ ┌───────────────────┐    ┌─────────────────────────────┐    ┌──────────────────────────────────────┐    ┌────────────────────┐
+ │ IMMs, presses,    │    │ Raspberry Pi / edge box at  │    │ sara-cmms-backend · Node 22+, Express│    │ ai.swayatt.com     │
+ │ CNCs, compressors,│───►│ the machine (PLC / SCADA /  │    │  auth (JWT + sessions) · records.js  │◄──►│ sara-cmms-frontend │
+ │ chiller, furnaces,│    │ energy meter)               │    │  live poller 3 s → event bus → SSE   │REST│ React 19 + Vite,   │
+ │ main incomer      │    │  telemetry every 5 s        │    │  engines: capacity, production and   │SSE │ served by nginx    │
+ └───────────────────┘    │  status, counters, quality  │    │   maintenance planners, costs, KPIs, │ WS │                    │
+                          │  ring buffer while offline  │    │   briefing                           │    │ Command Center,    │
+                          └────────┬────────────┬───────┘    │  AI: anomaly watch 60 s, investig-   │    │ Machines, Anomalies│
+                            line protocol     records        │   ations, chat agent (44 tools),     │    │ Planner, Costs,    │
+                                   ▼            ▼            │   voice gateway, insights, budget    │    │ KPIs, Chat, Voice, │
+                        InfluxDB (hosted)  MongoDB (hosted)  │   ledger                             │    │ modules, Superadmin│
+                        bucket per company records, AI state └──┬────────────┬────────────────┬─────┘    └────────────────────┘
+                        tags asset, status sessions, ai_usage ◄─┘ reads both │                │
+                                                                             ▼                ▼
+                                                                  Google Gemini API      Gemini Live API
+                                                                  router · fast · balanced  voice sessions
+                                                                  deep · background         over WebSocket
 ```
 
+- **Edge.** Every asset gets its own gateway (a Raspberry Pi or any edge box next to the machine) that reads
+  the PLC / SCADA / energy meter and writes telemetry straight into InfluxDB as line protocol every 5 s
+  (measurements `machineParams`, `sensorData`, `energy`, `shotCountDetails`, `qualityEvents`, `timelineData`;
+  tags `companyId`, `assetId`, `status`) and the machine's status, counters and quality events into MongoDB,
+  buffering in a ring buffer while the network is down. SARA never depends on a particular gateway; today
+  [sara-simulator](https://github.com/SwayattDrishtigochar/sara-simulator) plays the part of all 20 gateways
+  (the contract is `docs/simulator-v2.md`).
+- **Cloud.** Two Google Cloud Run services built by Cloud Build from this repo: `sara-cmms-backend`
+  (`server/Dockerfile`, Express 5 API, SSE and the voice WebSocket) and `sara-cmms-frontend` (`client/Dockerfile`,
+  the Vite build on nginx, `client/cloudbuild.yaml`). MongoDB (records, AI state, sessions, the `ai_usage`
+  ledger) and InfluxDB (one bucket per company) are hosted databases reachable from both the gateways and the API.
+- **AI.** Only the API talks to Gemini: the Gemini API for the chat tiers and the background calls, the Gemini
+  Live API for voice. The key never leaves the backend service.
 - `server/` — Express 5 API: registry-driven modules (one definition → Mongoose model, zod validation, REST,
   tenancy, permissions, agent access), the planning, cost, KPI and briefing engines, the anomaly watch, the chat
   agent and the voice gateway. `client/` — React 19 + Vite + Tailwind. `docs/` — system design and module contracts.
 - Live updates reach the browser over Server-Sent Events; voice uses one WebSocket per session.
-- Plant data gateways write machine telemetry into InfluxDB (one bucket per company, tagged by machine and
-  status) and plant activity into MongoDB; SARA reads both and never depends on a particular gateway.
 
 Details: [docs/system-design.md](docs/system-design.md) and the contracts in `docs/`.
 
