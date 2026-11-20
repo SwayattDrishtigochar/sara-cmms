@@ -18,6 +18,7 @@ import { exportRouter } from './routes/export.js';
 import { registerHealthCheck } from './routes/health.js';
 import { kpisRouter } from './routes/kpis.js';
 import { notificationsRouter } from './routes/notifications.js';
+import { optimizerRouter } from './routes/optimizer.js';
 import { planningRouter } from './routes/planning.js';
 import { planningMaintenanceRouter } from './routes/planningMaintenance.js';
 import { telemetryRouter } from './routes/telemetry.js';
@@ -52,6 +53,7 @@ const start = async () => {
       { path: '/api', router: costsRouter },
       { path: '/api', router: kpisRouter },
       { path: '/api', router: briefingRouter },
+      { path: '/api', router: optimizerRouter },
       { path: '/api', router: voiceRouter },
     ],
   });

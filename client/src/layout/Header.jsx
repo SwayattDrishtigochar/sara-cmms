@@ -1,4 +1,5 @@
-import { Building2, LogOut, Menu as MenuIcon, Monitor, Moon, Sun } from 'lucide-react';
+import { Box, Building2, LayoutDashboard, LogOut, Menu as MenuIcon, Monitor, Moon, Sun } from 'lucide-react';
+import { useLocation, useNavigate } from 'react-router';
 import { AskSara } from '../assistant/AskSara.jsx';
 import { useLogout, useMe } from '../auth/useAuth.js';
 import { useTheme } from '../lib/theme.js';
@@ -43,6 +44,28 @@ const PlantSwitcher = ({ ctx }) => {
   );
 };
 
+let lastNormalPath = '/';
+
+/** Normal view ⇄ 3D shop floor; back from 3D returns to the page you came from. */
+const ViewToggle = () => {
+  const { pathname, search } = useLocation();
+  const navigate = useNavigate();
+  const in3d = pathname === '/3d';
+  if (!in3d) lastNormalPath = pathname + search;
+  const Icon = in3d ? LayoutDashboard : Box;
+  return (
+    <Button
+      variant={in3d ? 'secondary' : 'ai'}
+      size="sm"
+      onClick={() => navigate(in3d ? lastNormalPath : '/3d')}
+      aria-label={in3d ? 'Normal view' : '3D view'}
+    >
+      <Icon className="size-4" />
+      <span className="hidden sm:inline">{in3d ? 'Normal view' : '3D view'}</span>
+    </Button>
+  );
+};
+
 export const Header = ({ extra }) => {
   const { data } = useMe();
   const logout = useLogout();
@@ -71,6 +94,7 @@ export const Header = ({ extra }) => {
       </div>
 
       {extra}
+      {!ctx.company.isPlatform && <ViewToggle />}
       <PlantSwitcher ctx={ctx} />
       {!ctx.company.isPlatform && <VoiceButton />}
       {!ctx.company.isPlatform && <AskSara shortcut />}

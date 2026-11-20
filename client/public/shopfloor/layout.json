@@ -1,0 +1,135 @@
+{
+  "schema_version": "1.0",
+  "units": "meters",
+  "coordinate_system": "three.js world: Y up, +Z toward the front walkway, origin at hall centre on the floor",
+  "models": {
+    "environment": "export/shopfloor_env_draco.glb",
+    "cnc": "export/models/cnc_vmc_draco.glb",
+    "imm": "export/models/imm_draco.glb"
+  },
+  "camera": {
+    "position": [
+      -15,
+      19,
+      26
+    ],
+    "target": [
+      0.5,
+      0,
+      -0.5
+    ],
+    "fov": 32
+  },
+  "machines": [
+    {
+      "id": "CNC-01",
+      "type": "cnc",
+      "position": [
+        -10,
+        0,
+        -4.5
+      ],
+      "rotationY": 0,
+      "state": "OFFLINE"
+    },
+    {
+      "id": "CNC-02",
+      "type": "cnc",
+      "position": [
+        -5,
+        0,
+        -4.5
+      ],
+      "rotationY": 0,
+      "state": "OFFLINE"
+    },
+    {
+      "id": "CNC-03",
+      "type": "cnc",
+      "position": [
+        0,
+        0,
+        -4.5
+      ],
+      "rotationY": 0,
+      "state": "OFFLINE"
+    },
+    {
+      "id": "CNC-04",
+      "type": "cnc",
+      "position": [
+        5,
+        0,
+        -4.5
+      ],
+      "rotationY": 0,
+      "state": "OFFLINE"
+    },
+    {
+      "id": "IMM-01",
+      "type": "imm",
+      "position": [
+        -13,
+        0,
+        4.2
+      ],
+      "rotationY": 0,
+      "state": "OFFLINE"
+    },
+    {
+      "id": "IMM-02",
+      "type": "imm",
+      "position": [
+        -7.8,
+        0,
+        4.2
+      ],
+      "rotationY": 0,
+      "state": "OFFLINE"
+    },
+    {
+      "id": "IMM-03",
+      "type": "imm",
+      "position": [
+        -2.6,
+        0,
+        4.2
+      ],
+      "rotationY": 0,
+      "state": "OFFLINE"
+    },
+    {
+      "id": "IMM-04",
+      "type": "imm",
+      "position": [
+        2.6,
+        0,
+        4.2
+      ],
+      "rotationY": 0,
+      "state": "OFFLINE"
+    },
+    {
+      "id": "IMM-05",
+      "type": "imm",
+      "position": [
+        7.8,
+        0,
+        4.2
+      ],
+      "rotationY": 0,
+      "state": "OFFLINE"
+    },
+    {
+      "id": "IMM-06",
+      "type": "imm",
+      "position": [
+        13,
+        0,
+        4.2
+      ],
+      "rotationY": 0,
+      "state": "OFFLINE"
+    }
+  ]
+}

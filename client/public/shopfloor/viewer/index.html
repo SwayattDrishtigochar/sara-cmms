@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shopfloor Digital Twin</title>
+<style>
+  :root { --bg: #e9ecef; --muted: #5b6168; }
+  html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden;
+    font: 13px/1.4 system-ui, "Segoe UI", Roboto, sans-serif; }
+  body.transparent { background: transparent; }
+  #shopfloor { position: fixed; inset: 0; }
+  #shopfloor canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); pointer-events: none; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="shopfloor"></div>
+<div id="loading">Loading 3D scene</div>
+
+<script type="module">
+/*
+  Shopfloor digital twin: 3D scene only. No UI overlays; the development team attaches cards,
+  labels and panels through the API below.
+
+  URL params
+    layout=../layout.json      machine list, model paths, camera
+    simulate=0                 disable demo motion (machines stay at rest until data arrives)
+    transparent=1              transparent canvas for compositing over a page background
+    autoHighlight=0            do not pulse the status ring of a clicked machine
+    origins=https://a,https://b  allowed postMessage origins (default: same origin only)
+
+  JS API: window.shopfloor (also resolved by the 'shopfloor:ready' event)
+    machines                          array of machine ids
+    getMachine(id)                    { id, type, state, root, nodes, userData }
+    setState(id, state)               RUNNING | IDLE | STOPPED | ALARM | MAINTENANCE | OFFLINE
+    apply(id, payload)                live data, same payloads as the single-machine viewers
+    focus(id) / resetView()           animated camera moves
+    highlight(id | null)              pulse a machine's status ring
+    getAnchor(id)                     { x, y, visible } CSS px inside the canvas, for overlay labels
+    project([x, y, z])                world point -> { x, y, visible }
+    onFrame(cb)                       cb() after every rendered frame (returns an unsubscribe fn)
+    dispose()                         free all GPU resources
+
+  DOM events on window
+    shopfloor:ready   detail { machines }
+    shopfloor:select  detail { id, type, part, role, dataTag, x, y }   (id null = empty click)
+    shopfloor:hover   detail { id, part }                              (only when it changes)
+
+  postMessage
+    { type: 'shopfloor', id: 'CNC-01', payload: {...} }
+    { type: 'shopfloor', updates: [ { id, payload }, ... ] }
+*/
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+const params = new URLSearchParams(location.search);
+const LAYOUT_URL = new URL(params.get('layout') || '../layout.json', location.href);
+const SIMULATE = params.get('simulate') !== '0';
+const TRANSPARENT = params.get('transparent') === '1';
+const AUTO_HIGHLIGHT = params.get('autoHighlight') !== '0';
+const ALLOWED_ORIGINS = (params.get('origins') || '').split(',').map(s => s.trim()).filter(Boolean);
+const THREE_VERSION = '0.170.0';
+
+// ------------------------------------------------------------------ renderer / scene
+const container = document.getElementById('shopfloor');
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: TRANSPARENT, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));   // large scene: slightly lower DPR cap
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.NeutralToneMapping;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.autoUpdate = false;                               // static shadows, refreshed on demand
+container.appendChild(renderer.domElement);
+if (TRANSPARENT) document.body.classList.add('transparent');
+
+const scene = new THREE.Scene();
+scene.background = TRANSPARENT ? null : new THREE.Color(0xe9ecef);
+const pmrem = new THREE.PMREMGenerator(renderer);
+const envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environment = envTex;
+scene.environmentIntensity = 0.85;
+pmrem.dispose();
+
+const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+sun.position.set(-12, 24, 16);
+sun.castShadow = true;
+sun.shadow.mapSize.set(4096, 4096);
+Object.assign(sun.shadow.camera, { left: -26, right: 26, top: 22, bottom: -22, near: 1, far: 80 });
+sun.shadow.camera.updateProjectionMatrix();          // required after changing frustum bounds
+sun.shadow.bias = -0.0004;
+sun.shadow.normalBias = 0.03;
+scene.add(sun, sun.target);
+
+const camera = new THREE.PerspectiveCamera(32, 1, 0.5, 250);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI * 0.47;
+controls.minDistance = 3;
+controls.maxDistance = 70;
+controls.addEventListener('change', () => {          // keep the pivot inside the hall
+  controls.target.x = THREE.MathUtils.clamp(controls.target.x, -17, 17);
+  controls.target.z = THREE.MathUtils.clamp(controls.target.z, -9.5, 9);
+  controls.target.y = THREE.MathUtils.clamp(controls.target.y, 0, 4);
+});
+
+// Laptop touchpads: a two-finger scroll walks across the floor (forward/back, left/right) instead of zooming
+// into the screen centre. Pinch (ctrl + wheel) and mouse-wheel notches zoom toward the point under the cursor.
+controls.zoomToCursor = true;
+controls.screenSpacePanning = false;                 // right-drag / two-finger drag pans along the floor
+const walkFwd = new THREE.Vector3(), walkRight = new THREE.Vector3(), walkStep = new THREE.Vector3();
+const walkFrom = new THREE.Vector3();
+let touchpadUntil = 0;                               // one gesture stays a walk even when a flick sends big deltas
+renderer.domElement.addEventListener('wheel', (e) => {
+  if (e.ctrlKey) return;                             // pinch: OrbitControls zooms to the cursor
+  const looksTouchpad = e.deltaMode === 0 && (e.deltaX !== 0 || !Number.isInteger(e.deltaY) || Math.abs(e.deltaY) < 50);
+  if (looksTouchpad) touchpadUntil = e.timeStamp + 300;
+  if (e.timeStamp > touchpadUntil) return;           // mouse wheel: OrbitControls zooms to the cursor
+  e.preventDefault();
+  e.stopImmediatePropagation();                      // capture listener runs first, so OrbitControls does not zoom too
+  fly = null;
+  const k = camera.position.distanceTo(controls.target) * 0.0008;   // farther away = bigger steps
+  camera.getWorldDirection(walkFwd); walkFwd.y = 0; walkFwd.normalize();
+  walkRight.crossVectors(walkFwd, camera.up).normalize();
+  walkStep.copy(walkFwd).multiplyScalar(-e.deltaY * k).addScaledVector(walkRight, e.deltaX * k);
+  walkFrom.copy(controls.target);
+  controls.target.add(walkStep);
+  controls.target.x = THREE.MathUtils.clamp(controls.target.x, -17, 17);
+  controls.target.z = THREE.MathUtils.clamp(controls.target.z, -9.5, 9);
+  camera.position.add(walkStep.subVectors(controls.target, walkFrom));   // camera moves exactly as far as the pivot
+  controls.update();
+}, { passive: false, capture: true });
+
+const draco = new DRACOLoader().setDecoderPath(
+  `https://cdn.jsdelivr.net/npm/three@${THREE_VERSION}/examples/jsm/libs/draco/gltf/`);
+const loader = new GLTFLoader().setDRACOLoader(draco).setMeshoptDecoder(MeshoptDecoder);
+
+// ------------------------------------------------------------------ machine state model
+const STATES = {
+  RUNNING:     { color: 0x22c55e, lamp: 'Green' },
+  IDLE:        { color: 0xf59e0b, lamp: 'Amber' },
+  STOPPED:     { color: 0xef4444, lamp: 'Red' },
+  ALARM:       { color: 0xef4444, lamp: 'Red', blink: true },
+  MAINTENANCE: { color: 0x2f80ed, lamp: 'Amber', blink: true },
+  OFFLINE:     { color: 0x8a9096, lamp: null },
+};
+const LAMP_COLORS = { Green: 0x22c55e, Amber: 0xf59e0b, Red: 0xef4444 };
+// materials that must be unique per machine instance (everything else stays shared)
+const PER_INSTANCE = /^MAT_(Lamp_|Status_Ring|Sensor_LED|HMI_Screen|Heater_)/;
+const IMM_ZONES = ['Nozzle', 'Z1', 'Z2', 'Z3', 'Z4', 'Z5'];
+const IMM_SETPOINTS = { Nozzle: 220, Z1: 215, Z2: 210, Z3: 205, Z4: 195, Z5: 60 };
+const C_COLD = new THREE.Color(0x7a7f85), C_WARM = new THREE.Color(0xf59e0b), C_HOT = new THREE.Color(0xef4444);
+const heatColor = (t, out) => {
+  const k = THREE.MathUtils.clamp((t - 40) / 220, 0, 1);
+  return k < 0.5 ? out.lerpColors(C_COLD, C_WARM, k / 0.5) : out.lerpColors(C_WARM, C_HOT, (k - 0.5) / 0.5);
+};
+const ease = (cur, tgt, k) => cur + (tgt - cur) * k;
+let shadowRefresh = 0;   // seconds of shadow-map refresh still pending
+
+class Machine {
+  constructor(def, template, index) {
+    this.id = def.id;
+    this.type = def.type;
+    this.p = def.type === 'cnc' ? 'CNC_' : 'IMM_';
+    this.root = template.clone(true);              // geometry + static materials shared with the template
+    this.root.name = def.id;
+    this.root.position.fromArray(def.position);
+    this.root.rotation.y = THREE.MathUtils.degToRad(def.rotationY || 0);
+    this.root.userData.machineId = def.id;
+    this.root.userData.machineType = def.type;
+    this.nodes = {};
+    const cache = new Map();
+    this.root.traverse((o) => {
+      if (o.name) this.nodes[o.name] = o;
+      if (!o.isMesh) return;
+      if (PER_INSTANCE.test(o.material.name)) {
+        if (!cache.has(o.material)) cache.set(o.material, o.material.clone());
+        o.material = cache.get(o.material);
+      }
+      if (!o.geometry.boundingSphere) o.geometry.computeBoundingSphere();
+      o.castShadow = o.geometry.boundingSphere.radius > 0.12 && !/Glass|StatusRing/.test(o.name);
+      o.receiveShadow = true;
+    });
+    this.rest = {};
+    for (const n of Object.values(this.nodes)) if (n.userData.dir_gltf) this.rest[n.name] = n.position.clone();
+    this.ring = this.nodes[this.p + 'StatusRing']?.material;
+    this.lamps = {};
+    for (const l of ['Green', 'Amber', 'Red']) this.lamps[l] = this.nodes[this.p + 'StackLight_' + l]?.material;
+    this.heaters = {};
+    if (this.type === 'imm') this.root.traverse((o) => {
+      const m = o.isMesh && o.material.name.match(/^MAT_Heater_(\w+)$/);
+      if (m) { this.heaters[m[1]] = o.material; o.material.metalness = 0.25; o.material.roughness = 0.45; }
+    });
+    this.t = index * 2.7;                           // phase offset so machines do not move in sync
+    this.cur = { x: 0, y: 0, z: 0, door: 1, clamp: 0, carriage: 0, gate: 1 };
+    this.tgt = { ...this.cur };
+    this.live = { rpm: 8000, shots: 1200 + index * 317, phase: 'COOL', partVisible: true,
+                  temps: { ...IMM_SETPOINTS } };
+    this.external = false;                          // true once real data drives motion
+    this.highlight = false;
+    this.screen = this.makeScreen();
+    this.setState(def.state || 'IDLE');
+    this.root.updateMatrixWorld(true);
+    this.box = new THREE.Box3().setFromObject(this.root);
+  }
+
+  makeScreen() {
+    const mesh = this.nodes[this.p + 'HMI_Screen'];
+    if (!mesh) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = 320; canvas.height = Math.round(320 / (mesh.userData.aspect || 1.3));
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.flipY = false;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const mat = mesh.material.clone();
+    mat.color.set(0x000000); mat.emissive.set(0xffffff); mat.emissiveMap = tex; mat.emissiveIntensity = 1;
+    mesh.material = mat;
+    return { canvas, ctx: canvas.getContext('2d'), tex, timer: Math.random() };
+  }
+
+  drawScreen() {
+    const s = this.screen; if (!s) return;
+    const { ctx, canvas } = s, w = canvas.width, h = canvas.height;
+    ctx.fillStyle = '#0d1217'; ctx.fillRect(0, 0, w, h);
+    if (this.state === 'OFFLINE') { s.tex.needsUpdate = true; return; }
+    ctx.fillStyle = '#' + STATES[this.state].color.toString(16).padStart(6, '0');
+    ctx.fillRect(0, 0, w, 44);
+    ctx.fillStyle = '#0d1217'; ctx.font = 'bold 24px system-ui, sans-serif';
+    ctx.fillText(this.state, 12, 31);
+    ctx.fillStyle = '#e6edf3'; ctx.font = 'bold 30px system-ui, sans-serif';
+    ctx.fillText(this.id, 12, 88);
+    ctx.font = '20px ui-monospace, Consolas, monospace';
+    const run = this.state === 'RUNNING';
+    const lines = this.type === 'cnc'
+      ? [`S ${run ? this.live.rpm : 0} rpm`, `X${this.cur.x.toFixed(0)} Y${this.cur.y.toFixed(0)} Z${this.cur.z.toFixed(0)}`]
+      : [`${run ? this.live.phase : '-'}  #${this.live.shots}`, `N ${this.live.temps.Nozzle.toFixed(0)} C`];
+    lines.forEach((t, i) => ctx.fillText(t, 12, 124 + i * 30));
+    s.tex.needsUpdate = true;
+  }
+
+  setState(state) {
+    if (!STATES[state] || state === this.state) return;
+    this.state = state;
+    const st = STATES[state];
+    for (const [name, m] of Object.entries(this.lamps)) {
+      if (!m) continue;
+      const on = st.lamp === name;
+      m.emissive.set(LAMP_COLORS[name]);
+      m.emissiveIntensity = on ? 3 : 0;
+      m.color.set(LAMP_COLORS[name]).multiplyScalar(on ? 1 : 0.35);
+    }
+    if (this.ring) { this.ring.color.set(st.color); this.ring.emissive.set(st.color); }
+    this.tgt.door = state === 'MAINTENANCE' ? 0 : 1;     // CNC doors open for maintenance
+    this.tgt.gate = state === 'MAINTENANCE' ? 0 : 1;     // IMM safety gate open for maintenance
+    shadowRefresh = 2;
+    if (this.screen) this.drawScreen();
+  }
+
+  apply(p = {}) {
+    if (p.state) this.setState(p.state);
+    const motion = ['axes', 'clamp_mm', 'carriage_mm', 'door', 'gate'].some(k => p[k] !== undefined);
+    if (motion) this.external = true;
+    const clampT = (name, v) => { const t = this.nodes[name]?.userData.travel_mm; return t ? Math.min(t[1], Math.max(t[0], v)) : v; };
+    if (p.axes) for (const k of ['x', 'y', 'z'])
+      if (typeof p.axes[k] === 'number') this.tgt[k] = clampT('CNC_Axis_' + k.toUpperCase(), p.axes[k]);
+    if (typeof p.door === 'boolean') { this.tgt.door = p.door ? 1 : 0; shadowRefresh = 2; }
+    if (typeof p.gate === 'boolean') { this.tgt.gate = p.gate ? 1 : 0; shadowRefresh = 2; }
+    if (typeof p.clamp_mm === 'number') this.tgt.clamp = clampT('IMM_Axis_Clamp', p.clamp_mm);
+    if (typeof p.carriage_mm === 'number') this.tgt.carriage = clampT('IMM_Axis_Carriage', p.carriage_mm);
+    if (typeof p.rpm === 'number') this.live.rpm = p.rpm;
+    if (p.temps) Object.assign(this.live.temps, p.temps);
+    if (typeof p.shotCount === 'number') this.live.shots = p.shotCount;
+    if (p.phase) this.live.phase = p.phase;
+    if (typeof p.partVisible === 'boolean') this.live.partVisible = p.partVisible;
+  }
+
+  move(name, mm) {
+    const n = this.nodes[name], r = this.rest[name];
+    if (!n || !r) return;
+    const d = n.userData.dir_gltf;
+    n.position.set(r.x + d[0] * mm / 1000, r.y + d[1] * mm / 1000, r.z + d[2] * mm / 1000);
+  }
+
+  simulate(dt) {
+    if (this.state !== 'RUNNING' || this.external || !SIMULATE) return;
+    this.t += dt;
+    const t = this.t;
+    if (this.type === 'cnc') {
+      this.tgt.x = 150 * Math.sin(t * 0.35);
+      this.tgt.y = 100 * Math.sin(t * 0.22 + 1);
+      this.tgt.z = 40 + 30 * Math.sin(t * 0.5);
+    } else {
+      const c = t % 12;
+      if (c < this.prevCycle) this.live.shots++;
+      this.prevCycle = c;
+      const phase = c < 1.5 ? 'CLOSE' : c < 3 ? 'INJECT' : c < 8 ? 'COOL' : c < 9.5 ? 'OPEN' : c < 10.5 ? 'EJECT' : 'REMOVE';
+      this.live.phase = phase;
+      this.tgt.clamp = ['OPEN', 'EJECT', 'REMOVE'].includes(phase) ? 400 : 0;
+      this.tgt.carriage = phase === 'INJECT' || phase === 'COOL' ? 0 : 60;
+      this.live.partVisible = phase !== 'REMOVE';
+    }
+  }
+
+  update(dt, now) {
+    this.simulate(dt);
+    const k = 1 - Math.exp(-dt * 5);
+    for (const a of Object.keys(this.cur)) this.cur[a] = ease(this.cur[a], this.tgt[a], k);
+    if (this.type === 'cnc') {
+      this.move('CNC_Axis_X', this.cur.x);
+      this.move('CNC_Axis_Y', this.cur.y);
+      this.move('CNC_Axis_Z', this.cur.z);
+      const open = (1 - this.cur.door) * (this.nodes.CNC_Door?.userData.open_offset_mm || 0);
+      this.move('CNC_Door_Left', open);
+      this.move('CNC_Door_Right', open);
+      if (this.state === 'RUNNING') this.nodes.CNC_Spindle.rotation.y += Math.min(this.live.rpm, 240) / 60 * Math.PI * 2 * dt;
+    } else {
+      this.move('IMM_Axis_Clamp', this.cur.clamp);
+      this.move('IMM_Axis_Carriage', this.cur.carriage);
+      this.move('IMM_SafetyGate', (1 - this.cur.gate) * (this.nodes.IMM_SafetyGate?.userData.open_offset_mm || 0));
+      if (this.nodes.IMM_MouldedPart) this.nodes.IMM_MouldedPart.visible = this.live.partVisible;
+      // heaters: drift toward setpoint when powered, cool down when offline
+      const kt = 1 - Math.exp(-dt * 0.15);
+      for (const z of IMM_ZONES) {
+        if (!this.external) {
+          const goal = this.state === 'OFFLINE' ? 30 : this.state === 'STOPPED' ? IMM_SETPOINTS[z] - 25 : IMM_SETPOINTS[z];
+          this.live.temps[z] = ease(this.live.temps[z], goal, kt);
+        }
+        const m = this.heaters[z];
+        if (!m) continue;
+        heatColor(this.live.temps[z], m.color);
+        m.emissive.copy(m.color);
+        m.emissiveIntensity = THREE.MathUtils.clamp((this.live.temps[z] - 120) / 140, 0, 1) * 0.6;
+      }
+    }
+    const st = STATES[this.state];
+    if (st.blink && this.lamps[st.lamp]) this.lamps[st.lamp].emissiveIntensity = (now % 900) < 450 ? 3 : 0.2;
+    if (this.ring) this.ring.emissiveIntensity = this.highlight ? 2 + 2.5 * (0.5 + 0.5 * Math.sin(now / 160)) : 2;
+    if (this.screen && (this.screen.timer += dt) > 0.5) { this.screen.timer = 0; this.drawScreen(); }
+  }
+}
+
+// ------------------------------------------------------------------ load
+const machines = new Map();
+const machineGroup = new THREE.Group();
+machineGroup.name = 'Machines';
+scene.add(machineGroup);
+let envRoot = null;
+const loadGLB = (url) => new Promise((res, rej) => loader.load(url, res, undefined, rej));
+
+let resolveReady;
+const ready = new Promise((r) => { resolveReady = r; });
+
+(async () => {
+  const layout = await fetch(LAYOUT_URL).then((r) => r.json());
+  const url = (p) => new URL(p, LAYOUT_URL).href;
+  const [env, cnc, imm] = await Promise.all([
+    loadGLB(url(layout.models.environment)), loadGLB(url(layout.models.cnc)), loadGLB(url(layout.models.imm))]);
+
+  envRoot = env.scene;
+  envRoot.traverse((o) => {
+    if (o.isMesh) {
+      o.receiveShadow = true;
+      o.castShadow = /ENV_(Props|Storage|Walls)/.test(o.name) || /ENV_(Props|Storage|Walls)/.test(o.parent?.name || '');
+    }
+    o.matrixAutoUpdate = false;                    // static environment: skip per-frame matrix work
+    o.updateMatrix();
+  });
+  scene.add(envRoot);
+
+  const templates = { cnc: cnc.scene, imm: imm.scene };
+  layout.machines.forEach((def, i) => {
+    const m = new Machine(def, templates[def.type], i);
+    machines.set(def.id, m);
+    machineGroup.add(m.root);
+  });
+
+  const cam = layout.camera || {};
+  camera.fov = cam.fov || 32;
+  home.position.fromArray(cam.position || [-15, 19, 26]);
+  home.target.fromArray(cam.target || [0, 0, 0]);
+  camera.position.copy(home.position);
+  controls.target.copy(home.target);
+  camera.updateProjectionMatrix();
+  controls.update();
+
+  shadowRefresh = 0.1;
+  document.getElementById('loading')?.remove();
+  const detail = { machines: [...machines.keys()] };
+  resolveReady(api);
+  window.dispatchEvent(new CustomEvent('shopfloor:ready', { detail }));
+})().catch((err) => {
+  const el = document.getElementById('loading');
+  if (el) el.textContent = 'Scene failed to load. Serve this folder over http(s), not file://';
+  console.error(err);
+});
+
+// ------------------------------------------------------------------ camera moves
+const home = { position: new THREE.Vector3(), target: new THREE.Vector3() };
+let fly = null;   // { fromP, fromT, toP, toT, t }
+function flyTo(toP, toT) {
+  fly = { fromP: camera.position.clone(), fromT: controls.target.clone(), toP, toT, start: performance.now() };
+}
+function focus(id) {
+  const m = machines.get(id);
+  if (!m) return;
+  const c = m.box.getCenter(new THREE.Vector3());
+  const dir = camera.position.clone().sub(controls.target).normalize();
+  dir.y = Math.max(dir.y, 0.45); dir.normalize();
+  const size = m.box.getSize(new THREE.Vector3()).length();
+  flyTo(c.clone().add(dir.multiplyScalar(size * 1.6 + 2)), c);
+}
+const resetView = () => flyTo(home.position.clone(), home.target.clone());
+
+// ------------------------------------------------------------------ picking + events
+const raycaster = new THREE.Raycaster(), ndc = new THREE.Vector2();
+function pick(clientX, clientY) {
+  const r = renderer.domElement.getBoundingClientRect();
+  ndc.set(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  const hit = raycaster.intersectObject(machineGroup, true).find((h) => h.object.visible);
+  if (!hit) return null;
+  let o = hit.object, part = null;
+  while (o && !o.userData.machineType) {
+    if (!part && o.userData.twin_role && o.userData.twin_role !== 'machine_root') part = o;
+    o = o.parent;
+  }
+  if (!o) return null;
+  return { id: o.userData.machineId, type: o.userData.machineType, part: part?.name || null,
+           role: part?.userData.twin_role || null, dataTag: part?.userData.data_tag || null };
+}
+let downAt = null, lastHover = null, hoverQueued = null;
+const el = renderer.domElement;
+el.addEventListener('pointerdown', (e) => { downAt = [e.clientX, e.clientY]; });
+el.addEventListener('pointerup', (e) => {
+  if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 4) return;   // ignore drags
+  const hit = pick(e.clientX, e.clientY);
+  if (AUTO_HIGHLIGHT) highlight(hit?.id || null);
+  const r = el.getBoundingClientRect();
+  window.dispatchEvent(new CustomEvent('shopfloor:select', {
+    detail: { ...(hit || { id: null }), x: e.clientX - r.left, y: e.clientY - r.top } }));
+});
+el.addEventListener('pointermove', (e) => { hoverQueued = [e.clientX, e.clientY]; });
+el.addEventListener('pointerleave', () => { hoverQueued = null; });
+function processHover() {
+  if (!hoverQueued) return;
+  const hit = pick(...hoverQueued);
+  hoverQueued = null;
+  el.style.cursor = hit ? 'pointer' : '';
+  const key = hit ? hit.id + '|' + hit.part : null;
+  if (key !== lastHover) {
+    lastHover = key;
+    window.dispatchEvent(new CustomEvent('shopfloor:hover', { detail: hit ? { id: hit.id, part: hit.part } : { id: null } }));
+  }
+}
+function highlight(id) { for (const m of machines.values()) m.highlight = m.id === id; }
+
+// ------------------------------------------------------------------ overlay anchors
+const tmp = new THREE.Vector3();
+function project(p) {
+  tmp.set(p[0], p[1], p[2]).project(camera);
+  const r = el.getBoundingClientRect();
+  return { x: (tmp.x * 0.5 + 0.5) * r.width, y: (-tmp.y * 0.5 + 0.5) * r.height,
+           visible: tmp.z > -1 && tmp.z < 1 && Math.abs(tmp.x) <= 1 && Math.abs(tmp.y) <= 1 };
+}
+function getAnchor(id) {
+  const m = machines.get(id);
+  if (!m) return null;
+  const c = m.box.getCenter(new THREE.Vector3());
+  return project([c.x, m.box.max.y + 0.4, c.z]);
+}
+const frameListeners = new Set();
+const onFrame = (cb) => { frameListeners.add(cb); return () => frameListeners.delete(cb); };
+
+// ------------------------------------------------------------------ postMessage bridge
+window.addEventListener('message', (e) => {
+  const ok = ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS.includes(e.origin) : e.origin === location.origin;
+  if (!ok || e.data?.type !== 'shopfloor') return;
+  const list = e.data.updates || [{ id: e.data.id, payload: e.data.payload }];
+  for (const u of list) machines.get(u.id)?.apply(u.payload);
+});
+
+// ------------------------------------------------------------------ loop, resize, visibility
+const ro = new ResizeObserver(() => {
+  const w = container.clientWidth, h = container.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+});
+ro.observe(container);
+
+let last = performance.now();
+function tick(now) {
+  const dt = Math.min((now - last) / 1000, 0.1); last = now;
+  for (const m of machines.values()) m.update(dt, now);
+  if (fly) {
+    const t = Math.min((now - fly.start) / 900, 1);   // wall-clock based: same duration at any frame rate
+    const k = t * t * (3 - 2 * t);
+    camera.position.lerpVectors(fly.fromP, fly.toP, k);
+    controls.target.lerpVectors(fly.fromT, fly.toT, k);
+    if (t === 1) fly = null;
+  }
+  controls.update();
+  processHover();
+  if (shadowRefresh > 0) { renderer.shadowMap.needsUpdate = true; shadowRefresh -= dt; }
+  renderer.render(scene, camera);
+  for (const cb of frameListeners) cb();
+}
+renderer.setAnimationLoop(tick);
+
+let visible = true, onScreen = true;
+const sync = () => renderer.setAnimationLoop(visible && onScreen ? tick : null);
+document.addEventListener('visibilitychange', () => { visible = !document.hidden; last = performance.now(); sync(); });
+new IntersectionObserver(([e]) => { onScreen = e.isIntersecting; last = performance.now(); sync(); }).observe(container);
+
+// ------------------------------------------------------------------ teardown
+function dispose() {
+  renderer.setAnimationLoop(null);
+  ro.disconnect();
+  controls.dispose();
+  frameListeners.clear();
+  scene.traverse((o) => {
+    o.geometry?.dispose();                       // shared geometries: dispose() is idempotent
+    for (const m of [].concat(o.material || [])) {
+      for (const v of Object.values(m)) if (v?.isTexture) v.dispose();
+      m.dispose();
+    }
+  });
+  envTex.dispose();
+  draco.dispose();
+  renderer.dispose();
+  renderer.domElement.remove();
+}
+
+const api = {
+  ready,
+  get machines() { return [...machines.keys()]; },
+  getMachine: (id) => { const m = machines.get(id); return m && { id: m.id, type: m.type, state: m.state, root: m.root, nodes: m.nodes, userData: m.root.userData }; },
+  setState: (id, s) => machines.get(id)?.setState(s),
+  apply: (id, p) => machines.get(id)?.apply(p),
+  focus, resetView, highlight, getAnchor, project, onFrame, dispose,
+  scene, camera, renderer, controls,
+};
+window.shopfloor = api;
+</script>
+</body>
+</html>

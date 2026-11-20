@@ -14,6 +14,7 @@ import { MachinesPage } from './machines/MachinesPage.jsx';
 import { ModuleListPage } from './modules/ModuleListPage.jsx';
 import { RecordPage } from './modules/RecordPage.jsx';
 import { PlannerPage } from './planner/PlannerPage.jsx';
+import Plant3DPage from './plant3d/Plant3DPage.jsx';
 import { SuperAdminPage } from './superadmin/SuperAdminPage.jsx';
 import { Button, EmptyState } from './ui/core.jsx';
 
@@ -51,6 +52,7 @@ export const router = createBrowserRouter([
       { index: true, element: <Home /> },
       { path: 'machines', element: <MachinesPage /> },
       { path: 'machines/:id', element: <MachinePage /> },
+      { path: '3d', element: <Plant3DPage /> },
       { path: 'anomalies', element: <AnomaliesPage /> },
       { path: 'planner', element: <PlannerPage /> },
       { path: 'costs', element: <CostsPage /> },

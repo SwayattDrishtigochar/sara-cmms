@@ -9,6 +9,7 @@ import { useCan, useSession } from '../auth/useAuth.js';
 import { formatRelative } from '../lib/format.js';
 import { seedHistory, seedLatest, useLiveAsset, useLiveEvent } from '../live/liveStore.js';
 import { useRecord } from '../modules/useModules.js';
+import { OptimizerCard } from '../optimizer/OptimizerCard.jsx';
 import { EmptyState, Skeleton } from '../ui/core.jsx';
 import { AnomalyCard, FlaggedParameters, flaggedParameters } from './AnomalyCard.jsx';
 import { LINK_BUTTON, LiveBadge, StatusLine } from './bits.jsx';
@@ -181,6 +182,7 @@ const Machine360 = ({ asset }) => {
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_22rem]">
         <div className="min-w-0 space-y-5">
           {can('anomalies') && <FlaggedParameters assetId={id} onOpen={setOpenAnomaly} />}
+          <OptimizerCard assetId={id} assetType={asset.typeOfAsset} />
           <ParameterTiles
             assetId={id}
             fields={numeric}

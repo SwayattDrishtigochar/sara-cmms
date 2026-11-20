@@ -15,6 +15,7 @@ export const BACKGROUND_PURPOSES = new Set([
   'cost',
   'briefing',
   'planning',
+  'optimizer',
 ]);
 /** Statuses that consumed a request on Google's side. */
 const COUNTED = ['ok', 'error'];

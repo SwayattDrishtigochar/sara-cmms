@@ -488,6 +488,89 @@ const planningMock = (input = {}) => ({
   conflicts: [],
 });
 
+/** Production optimizer: a few proven levers per machine type (+pct % or +add units on the current value). */
+const OPTIMIZER_LEVERS = {
+  'Injection Moulding Machine': {
+    headline: 'Faster screw recovery and a slightly hotter melt can shorten the cycle',
+    levers: [
+      {
+        field: 'screwSpeed',
+        pct: 7,
+        effect: -3,
+        reason: 'A faster screw has the next shot ready sooner.',
+        risk: 'Too fast can overheat the melt; check the first parts for burn marks or splay.',
+      },
+      {
+        field: 'barrelTempZone3',
+        add: 4,
+        effect: -2,
+        reason: 'A slightly hotter front zone makes the melt flow easier, so the mould fills faster.',
+        risk: 'Hotter melt cools slower; watch for flash and sink marks.',
+      },
+      {
+        field: 'injectionPressure',
+        pct: 3,
+        effect: -1.5,
+        reason: 'A little more pressure fills the cavities faster.',
+        risk: 'Too much pressure can flash at the parting line.',
+      },
+    ],
+  },
+  'Power Press': {
+    headline: 'The press can run a few more strokes per minute',
+    levers: [
+      {
+        field: 'press_speed',
+        pct: 10,
+        effect: -7,
+        reason: 'More strokes per minute make more parts in the same time.',
+        risk: 'Check that feeding and part ejection keep up; watch for burrs as the die warms up.',
+      },
+    ],
+  },
+  'CNC Machine': {
+    headline: 'Slightly faster cutting can shorten the cycle',
+    levers: [
+      {
+        field: 'spindleSpeed',
+        pct: 6,
+        effect: -3,
+        reason: 'A higher spindle speed cuts faster while staying inside the tool limits.',
+        risk: 'Cutting tools wear faster; check edges and surface finish.',
+      },
+      {
+        field: 'axisLoadX',
+        pct: 8,
+        effect: -4,
+        reason: 'A higher X-axis feed shortens the cutting moves.',
+        risk: 'More load on the tool; watch for chatter and size drift on the first parts.',
+      },
+    ],
+  },
+};
+
+const optimizerMock = (input = {}) => {
+  const plan = OPTIMIZER_LEVERS[input.machine?.type];
+  const current = new Map((input.parameters ?? []).map((p) => [p.field, p.current]));
+  const recommendations = (plan?.levers ?? [])
+    .filter(({ field }) => typeof current.get(field) === 'number')
+    .map(({ field, pct, add, effect, reason, risk }) => {
+      const value = current.get(field);
+      return {
+        field,
+        recommended: round(add != null ? value + add : value * (1 + pct / 100), 2),
+        effectOnCycleTimePct: effect,
+        reason,
+        risk,
+      };
+    });
+  return {
+    headline: recommendations.length ? plan.headline : 'Already running close to its best settings',
+    recommendations,
+    notes: ['Change one setting at a time and check the first parts before the next change.'],
+  };
+};
+
 const defaultReply = (text) =>
   `I am running in mock mode (no Gemini key), so I cannot look that up for real. ${
     text ? `You asked: "${text.slice(0, 120)}". ` : ''
@@ -503,6 +586,7 @@ const BUILDERS = {
   cost: costMock,
   briefing: briefingMock,
   planning: planningMock,
+  optimizer: optimizerMock,
   test: () => 'Hello from SARA. This is the built-in mock model, so no Gemini call was made.',
   chat: (_input, text) => defaultReply(text),
 };
