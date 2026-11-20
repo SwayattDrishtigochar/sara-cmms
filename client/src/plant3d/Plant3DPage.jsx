@@ -7,7 +7,9 @@ import {
   ExternalLink,
   HardHat,
   LocateFixed,
+  Maximize2,
   MessageSquareWarning,
+  Minimize2,
   OctagonX,
   Sparkles,
   Wrench,
@@ -396,6 +398,20 @@ export default function Plant3DPage() {
   const [selectedId, setSelectedId] = useState(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
+  // Full screen: the whole 3D view (scene, labels, panels) fills the screen; Esc or the button leaves it.
+  const rootRef = useRef(null);
+  const [fullscreen, setFullscreen] = useState(false);
+  useEffect(() => {
+    const onChange = () =>
+      setFullscreen(Boolean(rootRef.current) && document.fullscreenElement === rootRef.current);
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
+    else rootRef.current?.requestFullscreen?.().catch(() => {});
+  };
+
   // Wait for the scene's API, then follow its hover/select events and pin the labels to the machines.
   const onFrameLoad = () => {
     const win = frameRef.current?.contentWindow;
@@ -464,7 +480,7 @@ export default function Plant3DPage() {
   const selected = selectedId ? byTag.get(selectedId) : null;
 
   return (
-    <div className="absolute inset-0 overflow-hidden bg-[#e9ecef]">
+    <div ref={rootRef} className="absolute inset-0 overflow-hidden bg-[#e9ecef]">
       <style>{`.sf-pin{animation:sf-bob 2.4s ease-in-out infinite}.sf-pin::after{content:'';position:absolute;inset:-6px;border-radius:9999px;border:2px solid var(--pin);animation:sf-ping 1.6s ease-out infinite}@keyframes sf-bob{50%{transform:translateY(-5px)}}@keyframes sf-ping{from{opacity:.9;transform:scale(.8)}to{opacity:0;transform:scale(1.7)}}`}</style>
       <iframe
         ref={frameRef}
@@ -634,8 +650,20 @@ export default function Plant3DPage() {
             </p>
           </div>
         )}
+        {document.fullscreenEnabled && (
+          <button
+            type="button"
+            onClick={toggleFullscreen}
+            className="pointer-events-auto absolute bottom-3 left-3 inline-flex items-center gap-1.5 rounded-full border border-white/60 bg-white/90 px-3 py-1.5 text-xs font-semibold text-slate-900 shadow-lg backdrop-blur transition hover:bg-white"
+            title={fullscreen ? 'Exit full screen (Esc)' : 'Full screen'}
+          >
+            {fullscreen ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}
+            {fullscreen ? 'Exit full screen' : 'Full screen'}
+          </button>
+        )}
+
         {error && (
-          <p className="absolute bottom-3 left-3 rounded-lg bg-white/90 px-3 py-2 text-sm text-red-600 shadow">
+          <p className="absolute bottom-14 left-3 rounded-lg bg-white/90 px-3 py-2 text-sm text-red-600 shadow">
             Couldn't load your machines: {error.message}
           </p>
         )}
