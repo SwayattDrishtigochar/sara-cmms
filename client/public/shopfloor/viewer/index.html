@@ -210,6 +210,9 @@ class Machine {
                   temps: { ...IMM_SETPOINTS } };
     this.external = false;                          // true once real data drives motion
     this.highlight = false;
+    this.cycle = 12;                                // IMM cycle period (s); apply({ cycleTime }) sets the real one
+    this.u = 0;                                     // position inside the current cycle, 0..1
+    this.operator = null;                           // Operator while a job card with an operator is running
     this.screen = this.makeScreen();
     this.setState(def.state || 'IDLE');
     this.root.updateMatrixWorld(true);
@@ -284,6 +287,7 @@ class Machine {
     if (typeof p.shotCount === 'number') this.live.shots = p.shotCount;
     if (p.phase) this.live.phase = p.phase;
     if (typeof p.partVisible === 'boolean') this.live.partVisible = p.partVisible;
+    if (typeof p.cycleTime === 'number' && p.cycleTime > 0) this.cycle = THREE.MathUtils.clamp(p.cycleTime, 8, 60);
   }
 
   move(name, mm) {
@@ -302,14 +306,21 @@ class Machine {
       this.tgt.y = 100 * Math.sin(t * 0.22 + 1);
       this.tgt.z = 40 + 30 * Math.sin(t * 0.5);
     } else {
-      const c = t % 12;
+      const P = this.cycle, s = P / 12, c = t % P;  // phases keep their 12 s proportions at any cycle time
       if (c < this.prevCycle) this.live.shots++;
       this.prevCycle = c;
-      const phase = c < 1.5 ? 'CLOSE' : c < 3 ? 'INJECT' : c < 8 ? 'COOL' : c < 9.5 ? 'OPEN' : c < 10.5 ? 'EJECT' : 'REMOVE';
+      this.u = c / P;
+      const phase = c < 1.5 * s ? 'CLOSE' : c < 3 * s ? 'INJECT' : c < 8 * s ? 'COOL'
+        : c < 9.5 * s ? 'OPEN' : c < 10.5 * s ? 'EJECT' : 'REMOVE';
       this.live.phase = phase;
       this.tgt.clamp = ['OPEN', 'EJECT', 'REMOVE'].includes(phase) ? 400 : 0;
       this.tgt.carriage = phase === 'INJECT' || phase === 'COOL' ? 0 : 60;
       this.live.partVisible = phase !== 'REMOVE';
+      if (this.operator) {                          // the operator opens the gate and takes the part out by hand
+        const gate = this.u >= 0.8 && this.u < 0.955 ? 0 : 1;
+        if (gate !== this.tgt.gate) { this.tgt.gate = gate; shadowRefresh = Math.max(shadowRefresh, 1.2); }
+        this.live.partVisible = this.u < 0.915;
+      }
     }
   }
 
@@ -348,6 +359,268 @@ class Machine {
     if (st.blink && this.lamps[st.lamp]) this.lamps[st.lamp].emissiveIntensity = (now % 900) < 450 ? 3 : 0.2;
     if (this.ring) this.ring.emissiveIntensity = this.highlight ? 2 + 2.5 * (0.5 + 0.5 * Math.sin(now / 160)) : 2;
     if (this.screen && (this.screen.timer += dt) > 0.5) { this.screen.timer = 0; this.drawScreen(); }
+    if (this.operator) this.operator.update(dt, now);
+  }
+}
+
+// ------------------------------------------------------------------ operators
+// One low-poly operator per machine whose job card is running with an operator (host: setOperator).
+// IMM: opens the safety gate, takes the moulded part out and drops it into a parts bin, in step with the
+// moulding cycle. CNC: stands at the HMI panel and presses buttons now and then. Geometries and materials
+// are shared by all operators; no castShadow (a blob shadow sits under the feet instead).
+const OP_MAT = {}, OP_GEO = {};
+const opMat = (key, color, extra = {}) =>
+  (OP_MAT[key] ??= new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0, ...extra }));
+const opGeo = (key, make) => (OP_GEO[key] ??= make());
+const opBlobMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.2, depthWrite: false });
+const sstep = (a, b, x) => { const t = THREE.MathUtils.clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+const angleTo = (from, to) => from + Math.atan2(Math.sin(to - from), Math.cos(to - from));
+
+function buildOperatorBody() {
+  const M = {
+    shoe: opMat('shoe', 0x1b1d21), pants: opMat('pants', 0x2c333d), shirt: opMat('shirt', 0x22324d),
+    vest: opMat('vest', 0xf58120, { roughness: 0.55 }),
+    stripe: opMat('stripe', 0xe3e7ec, { metalness: 0.5, roughness: 0.3, emissive: 0x777777, emissiveIntensity: 0.3 }),
+    skin: opMat('skin', 0xd9a27b), hat: opMat('hat', 0xf4f4f1, { roughness: 0.35 }),
+    dark: opMat('glasses', 0x101418, { roughness: 0.2, metalness: 0.4 }),
+  };
+  const mesh = (key, make, mat, x = 0, y = 0, z = 0) => {
+    const m = new THREE.Mesh(opGeo(key, make), mat); m.position.set(x, y, z); return m;
+  };
+  const grp = (x = 0, y = 0, z = 0) => { const g = new THREE.Group(); g.position.set(x, y, z); return g; };
+  const root = grp(), hips = grp(0, 0.93, 0);
+  root.add(hips);
+  hips.add(mesh('pelvis', () => new THREE.BoxGeometry(0.32, 0.14, 0.2), M.pants, 0, -0.02, 0));
+  const spine = grp(0, 0.04, 0);
+  hips.add(spine);
+  const torso = mesh('torso', () => new THREE.CapsuleGeometry(0.16, 0.3, 4, 10), M.shirt, 0, 0.27, 0);
+  torso.scale.set(1, 1, 0.68);
+  const vest = mesh('vest', () => new THREE.CylinderGeometry(0.176, 0.166, 0.4, 14), M.vest, 0, 0.25, 0);
+  vest.scale.set(1, 1, 0.72);
+  spine.add(torso, vest);
+  for (const y of [0.17, 0.31]) {
+    const s = mesh('stripe', () => new THREE.CylinderGeometry(0.179, 0.179, 0.035, 14, 1, true), M.stripe, 0, y, 0);
+    s.scale.set(1, 1, 0.73);
+    spine.add(s);
+  }
+  const neck = grp(0, 0.5, 0);
+  spine.add(neck);
+  neck.add(mesh('neck', () => new THREE.CylinderGeometry(0.045, 0.05, 0.08, 8), M.skin, 0, 0.02, 0));
+  const head = grp(0, 0.06, 0);
+  neck.add(head);
+  head.add(
+    mesh('head', () => new THREE.SphereGeometry(0.1, 14, 10), M.skin, 0, 0.1, 0),
+    mesh('hat', () => new THREE.SphereGeometry(0.118, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2), M.hat, 0, 0.14, 0),
+    mesh('brim', () => new THREE.CylinderGeometry(0.14, 0.14, 0.012, 16), M.hat, 0, 0.142, 0.012),
+    mesh('glasses', () => new THREE.BoxGeometry(0.15, 0.03, 0.02), M.dark, 0, 0.115, 0.09),
+  );
+  const arm = (side) => {                           // side -1 = right (figure faces +Z), +1 = left
+    const shoulder = grp(side * 0.205, 0.43, 0);
+    spine.add(shoulder);
+    shoulder.add(mesh('upperArm', () => new THREE.CapsuleGeometry(0.048, 0.2, 4, 8), M.shirt, 0, -0.13, 0));
+    const elbow = grp(0, -0.27, 0);
+    shoulder.add(elbow);
+    elbow.add(mesh('forearm', () => new THREE.CapsuleGeometry(0.042, 0.18, 4, 8), M.shirt, 0, -0.12, 0));
+    const hand = grp(0, -0.26, 0);
+    elbow.add(hand);
+    hand.add(mesh('hand', () => new THREE.SphereGeometry(0.048, 10, 8), M.skin, 0, -0.02, 0));
+    return { shoulder, elbow, hand };
+  };
+  const leg = (side) => {
+    const hip = grp(side * 0.09, -0.04, 0);
+    hips.add(hip);
+    hip.add(mesh('thigh', () => new THREE.CapsuleGeometry(0.068, 0.28, 4, 8), M.pants, 0, -0.2, 0));
+    const knee = grp(0, -0.42, 0);
+    hip.add(knee);
+    knee.add(
+      mesh('shin', () => new THREE.CapsuleGeometry(0.058, 0.3, 4, 8), M.pants, 0, -0.21, 0),
+      mesh('shoe', () => new THREE.BoxGeometry(0.11, 0.08, 0.26), M.shoe, 0, -0.44, 0.05),
+    );
+    return { hip, knee };
+  };
+  const blob = new THREE.Mesh(opGeo('blob', () => new THREE.CircleGeometry(0.34, 20)), opBlobMat);
+  blob.rotation.x = -Math.PI / 2;
+  blob.position.y = 0.008;
+  root.add(blob);
+  return { root, hips, spine, head, rArm: arm(-1), lArm: arm(1), rLeg: leg(-1), lLeg: leg(1) };
+}
+
+function buildBin() {
+  const mat = opMat('bin', 0x1f6fd1, { roughness: 0.5 });
+  const W = 0.6, D = 0.42, H = 0.34, T = 0.02;
+  const bin = new THREE.Group();
+  for (const [w, h, d, x, y, z] of [[W, T, D, 0, T / 2, 0], [W, H, T, 0, H / 2, -D / 2], [W, H, T, 0, H / 2, D / 2],
+    [T, H, D, -W / 2, H / 2, 0], [T, H, D, W / 2, H / 2, 0]]) {
+    const m = new THREE.Mesh(opGeo(`bin${w}${h}${d}`, () => new THREE.BoxGeometry(w, h, d)), mat);
+    m.position.set(x, y, z);
+    bin.add(m);
+  }
+  const blob = new THREE.Mesh(opGeo('binBlob', () => new THREE.PlaneGeometry(0.75, 0.56)), opBlobMat);
+  blob.rotation.x = -Math.PI / 2;
+  blob.position.y = 0.006;
+  bin.add(blob);
+  return bin;
+}
+
+/** A centred copy of the moulded part, scaled so its longest side is at most `maxSize` metres. */
+function partCopy(src, maxSize) {
+  const wrap = new THREE.Group(), part = src.clone(true);
+  part.position.set(0, 0, 0);
+  part.visible = true;
+  wrap.add(part);
+  wrap.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(part);
+  part.position.sub(box.getCenter(new THREE.Vector3()));
+  wrap.scale.setScalar(Math.min(1, maxSize / Math.max(...box.getSize(new THREE.Vector3()).toArray(), 1e-3)));
+  return wrap;
+}
+
+const POSE_KEYS = ['x', 'z', 'yaw', 'lean', 'twist', 'rFwd', 'rSide', 'rElb', 'lFwd', 'lSide', 'lElb', 'headYaw', 'headPitch'];
+
+class Operator {
+  constructor(machine, name) {
+    this.m = machine;
+    this.name = name;
+    Object.assign(this, buildOperatorBody());
+    const root = machine.root, origin = root.position;   // layout machines are not rotated: local = world - origin
+    root.updateMatrixWorld(true);
+    this.yawHome = Math.PI;                          // face the machine (its front is +Z)
+    if (machine.type === 'imm' && machine.nodes.IMM_SafetyGate) {
+      const gate = machine.nodes.IMM_SafetyGate;
+      const gb = new THREE.Box3().setFromObject(gate);
+      const mould = machine.nodes.IMM_MouldedPart ?? machine.nodes.IMM_Mould_Moving;   // stand in front of the mould
+      const mx = mould ? new THREE.Box3().setFromObject(mould).getCenter(new THREE.Vector3()).x : (gb.min.x + gb.max.x) / 2;
+      this.home = new THREE.Vector3(mx - origin.x, 0, gb.max.z - origin.z + 0.62);
+      this.gateSign = Math.sign(gate.userData.dir_gltf?.[0] ?? 1) || 1;
+      this.binSide = -this.gateSign;                 // bin on the side the gate does not slide to
+      this.bin = buildBin();
+      this.bin.position.set(this.home.x + this.binSide * 1.05, 0, this.home.z + 0.05);
+      root.add(this.bin);
+      const src = machine.nodes.IMM_MouldedPart;
+      if (src) {
+        this.part = partCopy(src, 0.2);
+        this.part.position.set(0.11, -0.07, 0.04);   // between the hands, held by the right one
+        this.part.visible = false;
+        this.rArm.hand.add(this.part);
+        this.pile = Array.from({ length: 8 }, (_, i) => {
+          const p = partCopy(src, 0.15);
+          p.position.set(((i % 3) - 1) * 0.15, 0.07 + Math.floor(i / 3) * 0.045, ((i % 2) - 0.5) * 0.13);
+          p.rotation.set(0.3 * (i % 2), i * 1.37, 0.2 * ((i + 1) % 2));
+          p.visible = false;
+          this.bin.add(p);
+          return p;
+        });
+      }
+      const hmi = machine.nodes.IMM_HMI_Screen;
+      this.hmiSide = hmi ? Math.sign(new THREE.Box3().setFromObject(hmi).getCenter(new THREE.Vector3()).x - origin.x - this.home.x) || 1 : 1;
+    } else {
+      const hmi = machine.nodes.CNC_HMI_Screen;
+      const hc = hmi ? new THREE.Box3().setFromObject(hmi).getCenter(new THREE.Vector3()).sub(origin) : new THREE.Vector3(0.8, 0, 0);
+      this.home = new THREE.Vector3(hc.x - 0.1, 0, machine.box.max.z - origin.z + 0.5);
+      this.hmiSide = 1;
+    }
+    this.cur = Object.fromEntries(POSE_KEYS.map((k) => [k, 0]));
+    this.cur.yaw = this.yawHome;
+    this.tgt = { ...this.cur };
+    this.carrying = false;
+    this.binCount = 0;
+    this.walk = 0;
+    this.seed = Math.random() * 1000;
+    root.add(this.root);
+    this.apply(1);
+  }
+
+  restPose(T, now) {
+    const st = this.m.state, n = now / 1000 + this.seed;
+    Object.assign(T, { x: 0, z: 0, yaw: this.yawHome, lean: 0.04, twist: 0, rFwd: 0.12, rSide: 0.06, rElb: 0.25,
+      lFwd: 0.12, lSide: 0.06, lElb: 0.25, headYaw: 0.35 * Math.sin(n * 0.4), headPitch: 0 });
+    if (this.carrying) Object.assign(T, { rFwd: 0.7, rElb: 1.3, lFwd: 0.7, lElb: 1.3, rSide: -0.12, lSide: -0.12 });
+    if (st === 'ALARM' || st === 'STOPPED') Object.assign(T, { headPitch: -0.35, headYaw: 0, rFwd: 0.25, rSide: 0.55, rElb: 1.7 });
+    if (st === 'MAINTENANCE') Object.assign(T, { x: (this.binSide ?? 1) * 1.5, z: 0.2 });
+  }
+
+  immPose(T, now) {
+    const m = this.m, u = m.u, g = this.gateSign, b = this.binSide;
+    const binYaw = b > 0 ? Math.PI / 2 : -Math.PI / 2;
+    this.restPose(T, now);
+    T.headYaw = 0;
+    const carry = () => Object.assign(T, { rFwd: 0.7, rElb: 1.3, lFwd: 0.7, lElb: 1.3, rSide: -0.12, lSide: -0.12 });
+    // take the part (REMOVE) and drop it in the bin (next CLOSE / INJECT)
+    if (u >= 0.915 && u < 0.99 && !this.carrying) { this.carrying = true; if (this.part) this.part.visible = true; }
+    if (u >= 0.11 && u < 0.5 && this.carrying) {
+      this.carrying = false;
+      if (this.part) this.part.visible = false;
+      if (this.pile) {
+        if (this.binCount % this.pile.length === 0) for (const p of this.pile) p.visible = false;
+        this.pile[this.binCount % this.pile.length].visible = true;
+        this.binCount++;
+      }
+    }
+    if (u < 0.05) {                                  // turn and step to the bin, part in hands
+      carry(); Object.assign(T, { yaw: binYaw, x: b * 0.42 });
+    } else if (u < 0.15) {                           // bend and drop the part into the bin
+      Object.assign(T, { yaw: binYaw, x: b * 0.42, lean: 0.5, rFwd: 0.95, rElb: 0.2, lFwd: 0.95, lElb: 0.2, rSide: -0.1, lSide: -0.1 });
+    } else if (u < 0.22) {                           // straighten up at the bin
+      Object.assign(T, { yaw: binYaw, x: b * 0.42 });
+    } else if (u < 0.32) {                           // walk back to the gate
+      Object.assign(T, { x: 0 });
+    } else if (u < 0.667) {                          // wait; glance at the HMI now and then
+      T.headYaw = u > 0.42 && u < 0.52 ? -this.hmiSide * 0.65 : 0.12 * Math.sin(now / 1500 + this.seed);
+    } else if (u < 0.78) {                           // mould opening: get ready
+      Object.assign(T, { lean: 0.08, rFwd: 0.4, rElb: 0.5 });
+    } else if (u < 0.875) {                          // slide the safety gate open, walking with it
+      Object.assign(T, { x: g * 0.38 * sstep(0.8, 0.87, u), lean: 0.15, rFwd: 1.25, rElb: 0.3, rSide: -0.1, twist: -g * 0.15 });
+    } else if (u < 0.915) {                          // lean in and reach into the mould
+      Object.assign(T, { x: 0, z: -0.22, lean: 0.45, rFwd: 1.45, rElb: 0.15, lFwd: 1.45, lElb: 0.15, rSide: -0.14, lSide: -0.14 });
+    } else if (u < 0.945) {                          // pull the part out
+      carry(); Object.assign(T, { z: 0, lean: 0.12 });
+    } else {                                         // close the gate with the free hand, part in the other
+      carry(); Object.assign(T, { x: g * 0.32 * (1 - sstep(0.955, 0.995, u)), lFwd: 1.2, lElb: 0.3, twist: -g * 0.12 });
+    }
+  }
+
+  cncPose(T, now) {
+    this.restPose(T, now);
+    const n = (now / 1000 + this.seed) % 7.5;
+    T.headYaw = n > 4 && n < 5.5 ? -0.45 : 0.1 * Math.sin(now / 1700);   // look through the door window
+    if (n < 1.3) Object.assign(T, { rFwd: 1.2, rElb: 0.65, lean: 0.12, headPitch: 0.15, headYaw: 0 });  // press the HMI
+  }
+
+  update(dt, now) {
+    const T = this.tgt;
+    if (this.m.state !== 'RUNNING') this.restPose(T, now);
+    else if (this.m.type === 'imm' && this.bin) this.immPose(T, now);
+    else this.cncPose(T, now);
+    this.apply(1 - Math.exp(-dt * 8), dt, now);
+  }
+
+  apply(k, dt = 0.016, now = 0) {
+    const c = this.cur, T = this.tgt, px = c.x, pz = c.z;
+    for (const key of POSE_KEYS) {
+      c[key] = key === 'yaw' ? c.yaw + (angleTo(c.yaw, T.yaw) - c.yaw) * k : c[key] + (T[key] - c[key]) * k;
+    }
+    this.root.position.set(this.home.x + c.x, 0, this.home.z + c.z);
+    this.root.rotation.y = c.yaw;
+    this.spine.rotation.set(c.lean + 0.012 * Math.sin(now / 650 + this.seed), c.twist, 0);
+    this.rArm.shoulder.rotation.set(-c.rFwd, 0, -c.rSide);
+    this.rArm.elbow.rotation.x = -c.rElb;
+    this.lArm.shoulder.rotation.set(-c.lFwd, 0, c.lSide);
+    this.lArm.elbow.rotation.x = -c.lElb;
+    this.head.rotation.set(c.headPitch, c.headYaw, 0);
+    const speed = Math.hypot(c.x - px, c.z - pz) / Math.max(dt, 1e-3);
+    this.walk += dt * speed * 9;
+    const amp = Math.min(speed * 0.9, 0.45), s = Math.sin(this.walk);
+    this.rLeg.hip.rotation.x = s * amp;
+    this.lLeg.hip.rotation.x = -s * amp;
+    this.rLeg.knee.rotation.x = Math.max(0, -s) * amp * 1.4 + c.lean * 0.25;
+    this.lLeg.knee.rotation.x = Math.max(0, s) * amp * 1.4 + c.lean * 0.25;
+    this.rLeg.hip.rotation.x -= c.lean * 0.25;
+    this.lLeg.hip.rotation.x -= c.lean * 0.25;
+  }
+
+  dispose() {
+    this.root.removeFromParent();
+    this.bin?.removeFromParent();
   }
 }
 
@@ -542,8 +815,32 @@ function dispose() {
   renderer.domElement.remove();
 }
 
+/** Adds (info = { name }) or removes (null) the operator working at a machine. Idempotent. */
+function setOperator(id, info) {
+  const m = machines.get(id);
+  if (!m) return;
+  if (!info) {
+    if (!m.operator) return;
+    m.operator.dispose();
+    m.operator = null;
+    m.tgt.gate = m.state === 'MAINTENANCE' ? 0 : 1;
+    return;
+  }
+  if (!m.operator) m.operator = new Operator(m, info.name);
+  m.operator.name = info.name;
+}
+const opAnchor = new THREE.Vector3();
+/** Screen point just above the operator's hard hat, for the host's name tag (like getAnchor). */
+function getOperatorAnchor(id) {
+  const op = machines.get(id)?.operator;
+  if (!op) return null;
+  op.head.getWorldPosition(opAnchor);
+  return project([opAnchor.x, opAnchor.y + 0.42, opAnchor.z]);
+}
+
 const api = {
   ready,
+  setOperator, getOperatorAnchor,
   get machines() { return [...machines.keys()]; },
   getMachine: (id) => { const m = machines.get(id); return m && { id: m.id, type: m.type, state: m.state, root: m.root, nodes: m.nodes, userData: m.root.userData }; },
   setState: (id, s) => machines.get(id)?.setState(s),
