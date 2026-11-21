@@ -7,6 +7,10 @@ export const influxEnabled = Boolean(env.INFLUX_URL && env.INFLUX_TOKEN);
 const client = influxEnabled
   ? new InfluxDB({ url: env.INFLUX_URL, token: env.INFLUX_TOKEN, timeout: 30_000 })
   : null;
+// Background-only queries over days of data (7-day anomaly baselines take ~30 s per asset remotely).
+const slowClient = influxEnabled
+  ? new InfluxDB({ url: env.INFLUX_URL, token: env.INFLUX_TOKEN, timeout: 300_000 })
+  : null;
 
 /** One bucket per company, named by its id (as in CMMS). */
 export const bucketFor = (companyId) => String(companyId);
@@ -16,8 +20,11 @@ const requireClient = () => {
   return client;
 };
 
-/** Runs a Flux query and returns plain row objects. */
-export const queryRows = (flux) => requireClient().getQueryApi(env.INFLUX_ORG).collectRows(flux);
+/** Runs a Flux query and returns plain row objects; `slow` allows 5 minutes instead of 30 s (background work only). */
+export const queryRows = (flux, { slow = false } = {}) => {
+  requireClient();
+  return (slow ? slowClient : client).getQueryApi(env.INFLUX_ORG).collectRows(flux);
+};
 
 const ensured = new Set();
 let orgId = null;

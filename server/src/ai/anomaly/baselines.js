@@ -2,6 +2,7 @@ import { flux, fluxDuration, fluxExpression } from '@influxdata/influxdb-client'
 import { bucketFor, influxEnabled, queryRows } from '../../config/influx.js';
 import { Baseline } from '../../db/models/Baseline.js';
 import { ParameterSpec } from '../../db/models/ParameterSpec.js';
+import { logger } from '../../lib/logger.js';
 import { ENERGY_FIELDS, RUNNING_STATES } from '../../telemetry/catalog.js';
 
 /**
@@ -57,7 +58,7 @@ from(bucket: ${bucketFor(companyId)})
 const rows = async (query) => {
   if (!influxEnabled) return [];
   try {
-    return await queryRows(query);
+    return await queryRows(query, { slow: true }); // 7 days per asset: ~30 s on a remote InfluxDB
   } catch (err) {
     if (err?.statusCode === 404) return []; // no bucket yet: no telemetry
     throw err;
@@ -157,14 +158,33 @@ export const baselineFor = async (companyId) => {
   return cache.get(key).map;
 };
 
-/** Baselines no older than `maxAgeMs` (recomputed when stale, missing, or empty for 10 minutes). */
+const refreshing = new Map(); // companyId → the refresh running in the background
+const failedAt = new Map(); // companyId → when the last refresh failed (retried after EMPTY_RETRY_MS)
+
+/**
+ * The company's baselines, recomputed when older than `maxAgeMs` (or empty for 10 minutes). A scan never
+ * waits for the recompute: 7 days take ~30 s per asset on a remote InfluxDB (minutes for a plant), which
+ * made every scan, and "Scan now", time out. The stored rows (or, with none, the spec bands in
+ * resolveBaseline) serve while one refresh per company runs in the background.
+ */
 export const ensureBaselines = async (companyId, { maxAgeMs = BASELINE_MAX_AGE_MS } = {}) => {
+  const key = String(companyId);
   const map = await baselineFor(companyId);
-  const entry = cache.get(String(companyId));
-  const age = Date.now() - entry.computedAt;
+  const age = Date.now() - cache.get(key).computedAt;
   if (age < (map.size ? maxAgeMs : EMPTY_RETRY_MS)) return map;
-  await refreshBaselines(companyId);
-  return cache.get(String(companyId)).map;
+  if (!refreshing.has(key) && Date.now() - (failedAt.get(key) ?? 0) >= EMPTY_RETRY_MS) {
+    refreshing.set(
+      key,
+      refreshBaselines(companyId)
+        .then(() => failedAt.delete(key))
+        .catch((err) => {
+          failedAt.set(key, Date.now());
+          logger.warn({ err, companyId: key }, 'baseline refresh failed');
+        })
+        .finally(() => refreshing.delete(key)),
+    );
+  }
+  return map;
 };
 
 /** Forgets cached baselines (tests, or after a company is removed). */
